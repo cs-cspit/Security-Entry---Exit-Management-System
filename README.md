@@ -405,4 +405,4 @@ This system processes biometric data (facial features). When deploying in produc
 
 **Version:** 1.0.0  
 **Last Updated:** 2024  
-**Author:** Security Entry & Exit Management System Team
+**Author:** Security Entry & Exit Management System Team, none of your business
