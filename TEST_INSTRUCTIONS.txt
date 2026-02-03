@@ -1,0 +1,56 @@
+================================================================================
+BASIC FACE DETECTION TEST - INSTRUCTIONS
+================================================================================
+
+STEP 1: INSTALL (30 seconds)
+----------------------------
+pip install opencv-python numpy
+
+
+STEP 2: RUN (10 seconds)
+------------------------
+python test_basic_face_detection.py
+
+
+STEP 3: TEST (90 seconds)
+-------------------------
+1. Show YOUR face          → Get ID: abc123de
+2. Show FRIEND #1          → Get ID: def456gh  
+3. Show FRIEND #2          → Get ID: ghi789jk
+4. Press Ctrl+C            → See: "Total Unique: 3" ✓
+
+
+EXPECTED RESULT:
+---------------
+Total Unique Persons Detected: 3
+
+Unique IDs:
+  1. abc123de
+  2. def456gh
+  3. ghi789jk
+
+
+TROUBLESHOOTING:
+---------------
+Camera not working?
+  → System Settings → Privacy & Security → Camera → Enable Terminal
+  → sudo killall VDCAssistant
+
+Getting 10+ IDs instead of 3?
+  → Edit test_basic_face_detection.py line 147
+  → Change: grace_period_seconds=5.0
+  → Change: similarity_threshold=0.60
+
+No faces detected?
+  → Ensure good lighting
+  → Face camera directly
+  → Move closer to camera
+
+
+MORE HELP:
+---------
+RUN_THIS_FIRST.md      - Complete guide
+BASIC_TEST_README.md   - Detailed setup
+START_HERE.md          - General overview
+
+================================================================================

@@ -5,7 +5,40 @@ Get up and running with the Face Re-Identification System in 5 minutes!
 
 ---
 
-## 🚀 5-Minute Setup
+## 🎯 **NEW: Basic Face Detection Test (RECOMMENDED FIRST STEP)**
+
+**Start here if you're having issues with the full pipeline!**
+
+This minimal test helps verify your setup works correctly before using the full system.
+
+### What It Does
+- ✅ Uses your Mac's webcam
+- ✅ Detects faces and assigns persistent Unique IDs
+- ✅ Prevents ID switching with 3-second grace period
+- ✅ Shows total unique persons on exit
+
+### Quick Run (2 commands)
+```bash
+pip install opencv-python numpy
+python test_basic_face_detection.py
+```
+
+### Test Scenario
+1. Show **your face** → Get ID (e.g., `abc123de`)
+2. Show **friend #1** → Get new ID (e.g., `def456gh`)
+3. Show **friend #2** → Get new ID (e.g., `ghi789jk`)
+4. Press **Ctrl+C** → Should show **"Total Unique: 3"** (not 10 or 20!)
+
+### Detailed Instructions
+See **[BASIC_TEST_README.md](./BASIC_TEST_README.md)** for complete setup and troubleshooting.
+
+---
+
+## 🚀 Full Pipeline Setup (Advanced)
+
+---
+
+### 5-Minute Setup
 
 ### Step 1: Install Dependencies (2 minutes)
 

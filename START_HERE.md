@@ -6,7 +6,42 @@ This is a **complete, ready-to-run face detection and re-identification system**
 
 ---
 
-## ⚡ Quick Start (5 Minutes)
+## 🎯 **RECOMMENDED: Start with Basic Test**
+
+**Having issues? Start here first!**
+
+Before running the full pipeline, test your webcam and face detection basics:
+
+### ✅ Basic Face Detection Test
+```bash
+# Install minimal dependencies
+pip install opencv-python numpy
+
+# Run the basic test
+python test_basic_face_detection.py
+```
+
+### 🧪 Test Scenario
+1. Show **your face** → Get ID: `abc123de`
+2. Show **friend #1** → Get ID: `def456gh`
+3. Show **friend #2** → Get ID: `ghi789jk`
+4. Press **Ctrl+C** → Should show: **"Total Unique: 3"** ✅ (not 10 or 20!)
+
+### 📖 Why Start Here?
+- ✅ Minimal dependencies (no TensorFlow/YOLO)
+- ✅ Tests camera access on macOS
+- ✅ Verifies face detection works
+- ✅ Tests ID persistence (no ID switching)
+- ✅ Quick feedback (2 minutes)
+
+### 📚 Detailed Instructions
+See **[BASIC_TEST_README.md](./BASIC_TEST_README.md)** for complete setup and troubleshooting.
+
+**Once this works, proceed to the full pipeline below!** ⬇️
+
+---
+
+## ⚡ Full Pipeline Quick Start (5 Minutes)
 
 ### Step 1: Install Dependencies (2 minutes)
 
