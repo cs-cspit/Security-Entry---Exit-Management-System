@@ -6,7 +6,40 @@ This is a **complete, ready-to-run face detection and re-identification system**
 
 ---
 
-## 🎯 **RECOMMENDED: Start with Basic Test**
+## 🎯 **NEW: Dual-Camera Entry/Exit System**
+
+**You have TWO cameras? Start here!**
+
+If you've connected your phone camera via Iriun, you can now track entries and exits:
+
+### ✅ Entry/Exit Tracking System
+```bash
+# Install minimal dependencies
+pip install opencv-python numpy
+
+# Run the dual-camera system
+python entry_exit_system.py
+```
+
+### 🚪 How It Works
+- **Camera 1 (Phone/Iriun)** = ENTRY point (green boxes)
+- **Camera 0 (Mac webcam)** = EXIT point (red boxes)
+- System tracks who's currently inside
+- Logs entry/exit timestamps and visit duration
+
+### 🧪 Test Scenario
+1. Show **your face** at ENTRY camera (Phone) → Terminal: `✓ ENTRY: abc123de entered`
+2. System shows: `Currently Inside: 1`
+3. Show **your face** at EXIT camera (Mac) → Terminal: `✗ EXIT: abc123de exited`
+4. System shows: `Currently Inside: 0`
+5. Press **Ctrl+C** → See full summary with visit durations
+
+### 📖 Detailed Instructions
+See **[ENTRY_EXIT_README.md](./ENTRY_EXIT_README.md)** or **[ENTRY_EXIT_QUICKSTART.txt](./ENTRY_EXIT_QUICKSTART.txt)** for complete setup.
+
+---
+
+## 🎯 **OR: Start with Basic Single-Camera Test**
 
 **Having issues? Start here first!**
 
@@ -37,7 +70,29 @@ python test_basic_face_detection.py
 ### 📚 Detailed Instructions
 See **[BASIC_TEST_README.md](./BASIC_TEST_README.md)** for complete setup and troubleshooting.
 
-**Once this works, proceed to the full pipeline below!** ⬇️
+**Once this works, proceed to entry/exit system or full pipeline below!** ⬇️
+
+---
+
+## 📚 System Options
+
+### Option 1: Entry/Exit System (Dual Camera) ⭐ NEW
+- **File:** `entry_exit_system.py`
+- **Cameras:** Phone (Iriun) = ENTRY, Mac webcam = EXIT
+- **Features:** Entry/exit tracking, "Inside_Now" database, visit duration
+- **Guide:** `ENTRY_EXIT_README.md`
+
+### Option 2: Basic Single-Camera Test (Simple)
+- **File:** `test_basic_face_detection.py`
+- **Camera:** Mac webcam only
+- **Features:** Face detection, persistent IDs, grace period
+- **Guide:** `BASIC_TEST_README.md`
+
+### Option 3: Full Pipeline (Advanced)
+- **File:** `face_reidentification_test.py`
+- **Dependencies:** TensorFlow, ArcFace, YOLO
+- **Features:** Advanced embeddings, FAISS matching
+- **Guide:** `README.md`
 
 ---
 
@@ -120,8 +175,12 @@ See **INDEX.md** for complete file navigation
 
 | File | Purpose | When to Use |
 |------|---------|-------------|
-| **face_reidentification_test.py** | Main application | Run the system |
+| **entry_exit_system.py** | Dual-camera entry/exit | Track entries/exits |
+| **test_basic_face_detection.py** | Basic single-camera test | Test face detection |
+| **face_reidentification_test.py** | Full pipeline (advanced) | Run full system |
 | **config.py** | Settings | Change parameters |
+| **ENTRY_EXIT_README.md** | Entry/exit guide | Setup dual cameras |
+| **BASIC_TEST_README.md** | Basic test guide | Single camera setup |
 | **example_components.py** | Component demos | Learn the pipeline |
 | **QUICKSTART.md** | Quick guide | Get started fast |
 | **README.md** | Full docs | Understand everything |
@@ -134,9 +193,33 @@ See **INDEX.md** for complete file navigation
 
 ## 🎮 How to Use
 
-### Basic Usage
+### Entry/Exit System (Dual Camera)
 ```bash
-# Start the system
+# Start entry/exit tracking
+python entry_exit_system.py
+
+# System will:
+# 1. Auto-detect both cameras (Mac + Phone)
+# 2. Track entries at Camera 1/Phone (green)
+# 3. Track exits at Camera 0/Mac (red)
+# 4. Show who's currently inside
+# 5. Log visit durations
+```
+
+### Basic Single-Camera Test
+```bash
+# Start basic face detection
+python test_basic_face_detection.py
+
+# System will:
+# 1. Open Mac webcam
+# 2. Detect faces with persistent IDs
+# 3. Show total unique persons on exit
+```
+
+### Full Pipeline (Advanced)
+```bash
+# Start the full system
 python face_reidentification_test.py
 
 # The system will:
@@ -274,12 +357,15 @@ pip install scipy numpy pillow tensorflow
 ## 🚀 Next Steps
 
 ### Immediate
-1. ✅ Run the system and test with your face
-2. ✅ Press 's' to see statistics
-3. ✅ Test with a friend (multiple people)
+1. ✅ If you have 2 cameras: Run `entry_exit_system.py` for entry/exit tracking
+2. ✅ If you have 1 camera: Run `test_basic_face_detection.py` for basic test
+3. ✅ Test with friends (multiple people)
+4. ✅ Check terminal output for entry/exit logs or ID counts
 
 ### This Week
-- [ ] Read QUICKSTART.md for detailed guide
+- [ ] Read ENTRY_EXIT_README.md for dual-camera setup (if applicable)
+- [ ] Read BASIC_TEST_README.md for single-camera details
+- [ ] Read QUICKSTART.md for full pipeline guide
 - [ ] Run example_components.py to learn pipeline
 - [ ] Customize config.py for your needs
 - [ ] Read README.md for full documentation

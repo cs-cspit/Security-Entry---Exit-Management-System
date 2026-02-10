@@ -1,0 +1,101 @@
+================================================================================
+CAMERA CONFIGURATION - ENTRY/EXIT SYSTEM
+================================================================================
+
+CURRENT SETUP:
+-------------
+✓ Camera 1 (Phone via Iriun) = ENTRY point  🟢 GREEN BOXES
+✓ Camera 0 (Mac Webcam)       = EXIT point   🔴 RED BOXES
+
+
+VISUAL LAYOUT:
+-------------
+
+Screen Display:
+┌──────────────────────────┬──────────────────────────┐
+│   ENTRY CAMERA (Green)   │   EXIT CAMERA (Red)      │
+│   [Phone via Iriun]      │   [Mac Webcam]           │
+│                          │                          │
+│   Show face here to      │   Show face here to      │
+│   ENTER the building     │   EXIT the building      │
+└──────────────────────────┴──────────────────────────┘
+
+
+WORKFLOW:
+--------
+1. Visitor arrives at entrance
+2. Shows face to Phone camera (ENTRY)
+   → System: "✓ ENTRY: abc123de entered"
+   → Status: "Currently Inside: 1"
+
+3. Visitor wants to leave
+4. Shows face to Mac camera (EXIT)
+   → System: "✗ EXIT: abc123de exited"
+   → Status: "Currently Inside: 0"
+
+
+PHYSICAL SETUP RECOMMENDATION:
+-----------------------------
+┌─────────────────────────────────────────────────────┐
+│                    BUILDING                         │
+│                                                     │
+│  [ENTRANCE]                          [EXIT]        │
+│      ↓                                  ↓          │
+│  📱 Phone Camera              💻 Mac Webcam         │
+│  (Iriun - ENTRY)              (EXIT)               │
+│      ↓                                  ↓          │
+│  Green boxes                      Red boxes        │
+│  People enter here            People exit here     │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+
+
+TESTING:
+-------
+Step 1: Show your face to Phone camera
+        → Terminal: "✓ ENTRY: abc123de entered"
+        → Green box with ID on screen
+
+Step 2: Move to Mac camera
+        → Terminal: "✗ EXIT: abc123de exited"
+        → Red box with same ID on screen
+
+Step 3: Press Ctrl+C
+        → Summary shows: Visit duration: XXs
+
+
+CAMERA INDICES:
+--------------
+If auto-detection fails, cameras are:
+  - entry_camera_index = 1  (Phone/Iriun)
+  - exit_camera_index  = 0  (Mac Webcam)
+
+To manually change, edit entry_exit_system.py line 607:
+  app = EntryExitApp(
+      entry_camera_index=1,   # Phone
+      exit_camera_index=0     # Mac
+  )
+
+
+TROUBLESHOOTING:
+---------------
+If cameras are swapped in display:
+  → Swap the indices in code
+  → entry_camera_index=0, exit_camera_index=1
+
+If phone camera not detected:
+  → Check Iriun is running on phone and Mac
+  → Verify same WiFi network
+  → Try camera index 0 or 2 instead of 1
+
+If Mac camera not working:
+  → System Settings → Privacy → Camera → Enable Terminal
+  → sudo killall VDCAssistant
+
+
+QUICK START:
+-----------
+python entry_exit_system.py
+
+
+================================================================================
