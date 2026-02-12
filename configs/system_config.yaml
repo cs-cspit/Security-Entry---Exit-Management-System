@@ -1,0 +1,265 @@
+# ============================================================================
+# Intelligence-Led Entry & Exit Management System
+# System Configuration File
+# ============================================================================
+
+# Camera Configuration
+cameras:
+  entry:
+    index: 1                      # Camera index for entry gate (Phone via Iriun)
+    name: "Entry Gate"
+    type: "phone"
+    resolution: [640, 480]
+    fps: 30
+
+  exit:
+    index: 0                      # Camera index for exit gate (Mac built-in)
+    name: "Exit Gate"
+    type: "builtin"
+    resolution: [640, 480]
+    fps: 30
+
+  room:
+    index: 2                      # Camera index for room monitoring (TBD)
+    name: "Room Monitor"
+    type: "phone"
+    resolution: [1280, 720]
+    fps: 30
+    enabled: false                # Will be enabled in Phase 2
+
+# Tracking Parameters
+tracking:
+  grace_period: 3.0               # Seconds before creating new ID
+  similarity_threshold: 0.65      # Face matching threshold (0-1)
+  trajectory_buffer_size: 30      # Number of frames to store for tail
+  max_disappeared_frames: 30      # Frames before marking person as left
+  min_detection_confidence: 0.5   # Minimum confidence for detection
+
+  # Kalman filter parameters for smoothing
+  kalman:
+    process_noise: 0.01
+    measurement_noise: 0.1
+
+# Re-Identification Parameters
+reid:
+  method: "histogram"             # Options: histogram, embedding, hybrid
+  face_weight: 0.7                # Weight for face features (0-1)
+  body_weight: 0.3                # Weight for body features (0-1)
+
+  # Histogram settings
+  histogram:
+    bins: [8, 8, 8]              # HSV bins
+    color_space: "hsv"
+
+  # Embedding settings (for Phase 7)
+  embedding:
+    model: "arcface"              # Options: arcface, facenet, deepface
+    threshold: 0.6
+
+# Velocity & Movement Parameters
+velocity:
+  walking_threshold: 2.0          # m/s - normal walking speed
+  running_threshold: 4.0          # m/s - running speed threshold
+  alert_consecutive_frames: 3     # Frames above threshold to trigger alert
+  smoothing_window: 10            # Frames for rolling average
+
+  # Calibration (pixels to meters conversion)
+  # Measured by placing known distance object in frame
+  pixels_per_meter: 100.0         # To be calibrated per camera
+
+# Density & Crowd Parameters
+density:
+  grid_size: [5, 5]               # Divide frame into NxN zones
+  zone_capacity: 5                # Normal capacity per zone (people)
+  critical_density: 8             # Critical threshold per zone (people)
+  alert_duration: 5.0             # Seconds above threshold to alert
+
+  # Proximity parameters
+  personal_space_radius: 0.5      # Meters - normal personal space
+  crowd_radius: 0.3               # Meters - crowded condition
+
+# Threat Detection Parameters
+threat:
+  enabled: true
+
+  # Threat score weights (must sum to 1.0)
+  weights:
+    velocity: 0.4                 # Weight for relative velocity
+    trajectory_entropy: 0.3       # Weight for path chaos
+    proximity_density: 0.3        # Weight for crowd density
+
+  # Thresholds
+  warning_threshold: 0.5          # Threat score for WARNING
+  critical_threshold: 0.8         # Threat score for CRITICAL
+
+# Alert System Configuration
+alerts:
+  enabled: true
+
+  levels:
+    INFO: 0
+    WARNING: 1
+    CRITICAL: 2
+
+  types:
+    - RUNNING
+    - MASS_GATHERING
+    - UNAUTHORIZED_ENTRY
+    - HIGH_THREAT_SCORE
+    - LOITERING
+    - PANIC_BEHAVIOR
+
+  # Alert behavior
+  console_output: true
+  file_logging: true
+  visual_indicator: true
+  audio_alert: false              # Beep on critical alerts
+
+  # Alert cooldown (prevent spam)
+  cooldown_seconds: 5.0           # Min time between same alert type
+
+# Database Configuration
+database:
+  type: "sqlite"
+  path: "data/security_system.db"
+
+  # Logging
+  log_trajectories: true
+  log_threat_events: true
+  trajectory_sample_rate: 5       # Store every Nth frame
+
+  # Retention
+  retention_days: 30              # Days to keep logs
+  auto_cleanup: true
+
+# Display Configuration
+display:
+  show_stats: true
+  show_trails: true
+  show_bbox: true
+  show_ids: true
+  show_velocity: true
+  show_heatmap: false             # Density heatmap (Phase 5)
+
+  # Colors (BGR format for OpenCV)
+  colors:
+    entry: [0, 255, 0]            # Green
+    exit: [0, 0, 255]             # Red
+    tracked: [255, 255, 0]        # Cyan
+    unauthorized: [0, 0, 255]     # Red
+    running: [0, 165, 255]        # Orange
+
+  # Trail visualization
+  trail:
+    length: 30                    # Points to show
+    thickness: 2
+    fade: true                    # Fade older points
+    color_by_velocity: true       # Color code by speed
+
+  # Font settings
+  font:
+    scale: 0.6
+    thickness: 2
+    color: [255, 255, 255]        # White
+
+# Performance Configuration
+performance:
+  multi_threading: true
+  thread_count: 3                 # One per camera
+  frame_skip: false               # Skip frames if processing is slow
+  skip_interval: 1                # Process every Nth frame
+
+  # GPU acceleration
+  use_gpu: false                  # Enable if CUDA available
+  gpu_device: 0
+
+# Detection Models
+models:
+  face_detector: "haar"           # Options: haar, dlib, mtcnn
+  person_detector: "yolo"         # Options: yolo, haar
+
+  yolo:
+    model_path: "models/yolov8n.pt"
+    confidence: 0.5
+    iou_threshold: 0.45
+    device: "cpu"                 # cpu or cuda
+
+  haar:
+    cascade_path: "haarcascade_frontalface_default.xml"
+    scale_factor: 1.1
+    min_neighbors: 5
+
+# Logging Configuration
+logging:
+  level: "INFO"                   # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  console: true
+  file: true
+  file_path: "data/system.log"
+  max_file_size: 10485760         # 10 MB
+  backup_count: 5
+
+  # What to log
+  log_detections: true
+  log_matches: true
+  log_alerts: true
+  log_performance: true
+
+# Export Configuration
+export:
+  enabled: true
+  format: "json"                  # Options: json, csv
+
+  # Auto-export on exit
+  export_on_exit: true
+  export_path: "data/exports/"
+
+  # What to export
+  export_sessions: true
+  export_trajectories: true
+  export_alerts: true
+  export_statistics: true
+
+# Development & Debug
+debug:
+  enabled: false
+  show_fps: true
+  show_detection_boxes: true
+  save_debug_frames: false
+  debug_frame_path: "data/debug_frames/"
+  verbose_logging: false
+
+# System Behavior
+system:
+  auto_start: true
+  graceful_shutdown: true
+  save_state_on_exit: true
+
+  # Session management
+  session_timeout: 3600           # Seconds (1 hour)
+  auto_reset_daily: true
+  reset_time: "00:00"             # HH:MM format
+
+# Calibration (to be filled during setup)
+calibration:
+  entry_camera:
+    focal_length: null
+    distortion: null
+    homography: null
+
+  exit_camera:
+    focal_length: null
+    distortion: null
+    homography: null
+
+  room_camera:
+    focal_length: null
+    distortion: null
+    homography: null
+    room_dimensions: [10.0, 8.0]  # Width x Height in meters
+
+# Version & Metadata
+metadata:
+  version: "0.1.0"
+  phase: "1"
+  last_updated: "2024-12-01"
+  config_version: "1.0"
