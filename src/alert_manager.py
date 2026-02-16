@@ -19,9 +19,9 @@ from typing import Callable, Dict, List, Optional
 class AlertLevel(Enum):
     """Alert severity levels."""
 
-    INFO = 0
-    WARNING = 1
-    CRITICAL = 2
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
 
 
 class AlertType(Enum):
@@ -140,9 +140,9 @@ class AlertManager:
             Formatted string
         """
         level_symbol = {
-            AlertLevel.INFO.value: "ℹ️",
-            AlertLevel.WARNING.value: "⚠️",
-            AlertLevel.CRITICAL.value: "🚨",
+            "info": "ℹ️",
+            "warning": "⚠️",
+            "critical": "🚨",
         }
 
         symbol = level_symbol.get(alert["alert_level"], "•")
@@ -187,9 +187,9 @@ class AlertManager:
         """
         # ANSI color codes
         colors = {
-            AlertLevel.INFO.value: "\033[94m",  # Blue
-            AlertLevel.WARNING.value: "\033[93m",  # Yellow
-            AlertLevel.CRITICAL.value: "\033[91m",  # Red
+            "info": "\033[94m",  # Blue
+            "warning": "\033[93m",  # Yellow
+            "critical": "\033[91m",  # Red
         }
         reset = "\033[0m"
 
@@ -297,7 +297,7 @@ class AlertManager:
             self._write_to_log_file(alert)
 
         # Audio alert for critical
-        if alert_level == AlertLevel.CRITICAL:
+        if alert_level.value == "critical":
             self._play_audio_alert()
 
         # Execute callbacks
@@ -410,14 +410,10 @@ class AlertManager:
             "time_window_minutes": time_window_minutes,
             "total_in_window": len(recent),
             "critical_count": len(
-                [a for a in recent if a["alert_level"] == AlertLevel.CRITICAL.value]
+                [a for a in recent if a["alert_level"] == "critical"]
             ),
-            "warning_count": len(
-                [a for a in recent if a["alert_level"] == AlertLevel.WARNING.value]
-            ),
-            "info_count": len(
-                [a for a in recent if a["alert_level"] == AlertLevel.INFO.value]
-            ),
+            "warning_count": len([a for a in recent if a["alert_level"] == "warning"]),
+            "info_count": len([a for a in recent if a["alert_level"] == "info"]),
             "most_common_type": None,
         }
 
@@ -426,7 +422,9 @@ class AlertManager:
             type_counts = defaultdict(int)
             for alert in recent:
                 type_counts[alert["alert_type"]] += 1
-            summary["most_common_type"] = max(type_counts, key=type_counts.get)
+            summary["most_common_type"] = (
+                max(type_counts, key=type_counts.get) if type_counts else None
+            )
 
         return summary
 

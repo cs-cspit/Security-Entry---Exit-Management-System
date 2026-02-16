@@ -30,9 +30,9 @@ class PersonState(Enum):
 class AlertLevel(Enum):
     """Alert severity levels."""
 
-    INFO = 0
-    WARNING = 1
-    CRITICAL = 2
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
 
 
 class AlertType(Enum):
