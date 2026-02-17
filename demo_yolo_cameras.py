@@ -475,8 +475,35 @@ class YOLOThreeCameraSystem:
         face_detections = self.face_detector.detect(frame)
         body_detections = self.body_detector.detect(frame)
 
+        # Draw all body detections (blue boxes)
+        for body_bbox in body_detections:
+            bx, by, bw, bh, bconf = body_bbox
+            cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (255, 150, 0), 2)
+            cv2.putText(
+                frame,
+                f"Body: {bconf:.2f}",
+                (bx, by - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 150, 0),
+                2,
+            )
+
+        # Process face detections for exit matching
         for face_bbox in face_detections:
             x, y, w, h, conf = face_bbox
+
+            # Draw face detection (yellow box by default)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
+            cv2.putText(
+                frame,
+                f"Face: {conf:.2f}",
+                (x, y - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 255),
+                2,
+            )
 
             # Extract features
             face_features = self.face_detector.extract_face_features(
@@ -510,8 +537,8 @@ class YOLOThreeCameraSystem:
             )
 
             if matched_id and matched_id in self.inside_people:
-                # Person exiting
-                color = (0, 255, 255)
+                # Person exiting - draw GREEN box over the yellow one
+                color = (0, 255, 0)
                 label = f"{matched_id} EXITING"
 
                 # Record exit
@@ -530,11 +557,44 @@ class YOLOThreeCameraSystem:
 
                 print(f"👋 EXIT DETECTED: {matched_id} | Similarity: {similarity:.3f}")
 
-                # Draw
+                # Draw MATCHED detection (green, thicker)
                 cv2.rectangle(frame, (x, y), (x + w, y + h), color, 3)
-                cv2.putText(
-                    frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2
+
+                # Label background
+                label_bg = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+                cv2.rectangle(
+                    frame, (x, y - label_bg[1] - 10), (x + label_bg[0], y), color, -1
                 )
+                cv2.putText(
+                    frame,
+                    label,
+                    (x, y - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 0, 0),
+                    2,
+                )
+
+        # Add color legend to exit camera
+        legend_y = 30
+        cv2.putText(
+            frame,
+            "EXIT DETECTION:",
+            (10, legend_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            2,
+        )
+        cv2.putText(
+            frame,
+            "Yellow=Face | Blue=Body | GREEN=MATCHED EXIT",
+            (10, legend_y + 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (255, 255, 255),
+            1,
+        )
 
         return frame
 
@@ -723,11 +783,11 @@ class YOLOThreeCameraSystem:
         # Alert stats
         alert_stats = self.alert_manager.get_stats()
         print("\nALERT STATISTICS:")
-        print(f"  Total Alerts: {alert_stats['total_alerts']}")
-        print(f"  Info:         {alert_stats['info']}")
-        print(f"  Warning:      {alert_stats['warning']}")
-        print(f"  Critical:     {alert_stats['critical']}")
-        print(f"  Suppressed:   {alert_stats['suppressed']}")
+        print(f"  Total Alerts: {alert_stats.get('total_alerts', 0)}")
+        print(f"  Info:         {alert_stats.get('info', 0)}")
+        print(f"  Warning:      {alert_stats.get('warning', 0)}")
+        print(f"  Critical:     {alert_stats.get('critical', 0)}")
+        print(f"  Suppressed:   {alert_stats.get('suppressed', 0)}")
 
         print("\n✅ YOLO system shutdown complete")
         print("=" * 60 + "\n")
