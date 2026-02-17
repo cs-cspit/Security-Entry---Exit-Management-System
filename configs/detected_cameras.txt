@@ -1,11 +1,15 @@
 # Detected Camera Configuration
-# Generated: 2026-02-16 20:08:26
+# Generated: 2026-02-16 22:29:45
 
 Camera 0:
+  Resolution: 1280x720
+  FPS: 15.0
+
+Camera 1:
   Resolution: 1920x1080
   FPS: 30.0
 
-Camera 1:
+Camera 2:
   Resolution: 1920x1080
   FPS: 15.0
 

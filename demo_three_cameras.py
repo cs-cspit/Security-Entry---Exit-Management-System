@@ -33,7 +33,7 @@ import numpy as np
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from alert_manager import AlertLevel, AlertManager
+from alert_manager import AlertLevel, AlertManager, AlertType
 from enhanced_database import EnhancedDatabase
 
 
@@ -169,12 +169,24 @@ class ThreeCameraDemo:
         # Setup signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
 
-        print("\n📋 SYSTEM READY")
+        # Auto-registration tracking
+        self.entry_last_seen = {}  # {face_key: last_time} to prevent duplicate registration
+        self.auto_register_cooldown = 3.0  # seconds between auto-registrations
+
+        # Visual notifications for auto-registration
+        self.notification_queue = []  # List of (message, timestamp, color) tuples
+        self.notification_duration = 3.0  # seconds to show notification
+
+        print("\n📋 SYSTEM READY - FULLY AUTOMATED")
         print("-" * 60)
-        print("Controls:")
-        print("  - Press 'e' to register person at ENTRY camera")
-        print("  - Press 'x' to register person at EXIT camera")
+        print("🤖 AUTO-REGISTRATION MODE:")
+        print("  ✅ Entry camera will AUTO-REGISTER new people")
+        print("  ✅ Room camera will AUTO-TRACK registered people")
+        print("  ✅ Exit camera will AUTO-DETECT exits")
+        print("\nManual Controls:")
+        print("  - Press 'r' to FORCE register person at entry (override)")
         print("  - Press 'q' to quit and save session data")
+        print("  - Click buttons on screen for manual control")
         print("-" * 60 + "\n")
 
     def signal_handler(self, sig, frame):
@@ -182,8 +194,82 @@ class ThreeCameraDemo:
         print("\n\n⚠️  Interrupt signal received...")
         self.running = False
 
-    def register_person_at_entry(self):
-        """Register a person detected at entry camera."""
+    def _get_face_key(self, bbox):
+        """Generate a simple key for a face to track duplicates."""
+        x, y, w, h = bbox
+        return f"{x}_{y}_{w}_{h}"
+
+    def auto_register_at_entry(self, frame):
+        """Automatically register new people detected at entry camera."""
+        faces = self.entry_tracker.detect_faces(frame)
+        current_time = time.time()
+
+        for bbox in faces:
+            x, y, w, h = bbox
+
+            # Check if we recently registered this face position
+            face_key = self._get_face_key(bbox)
+            last_seen = self.entry_last_seen.get(face_key, 0)
+
+            if current_time - last_seen < self.auto_register_cooldown:
+                continue  # Skip, too soon
+
+            # Extract features
+            features = self.entry_tracker.extract_features(frame, bbox)
+
+            # Check if this person is already registered (match existing features)
+            is_already_registered = False
+            for person_id, person_info in self.registered_people.items():
+                registered_features = person_info["features"]
+                similarity = self.entry_tracker._compare_histograms(
+                    features, registered_features
+                )
+                if similarity >= 0.70:  # High threshold for auto-registration
+                    is_already_registered = True
+                    break
+
+            if is_already_registered:
+                continue  # Already registered, skip
+
+            # Generate person ID
+            person_id = f"P{len(self.registered_people) + 1:03d}"
+            timestamp = time.time()
+
+            # Store in database
+            self.database.record_entry(person_id)
+
+            # Store locally
+            self.registered_people[person_id] = {
+                "features": features,
+                "name": person_id,
+                "entry_time": timestamp,
+                "bbox": bbox,
+            }
+
+            # Update last seen
+            self.entry_last_seen[face_key] = current_time
+
+            self.stats["registered_people"] += 1
+            self.stats["entry_detections"] += 1
+
+            # Create alert
+            self.alert_manager.create_alert(
+                alert_type=AlertType.UNAUTHORIZED_ENTRY,
+                alert_level=AlertLevel.INFO,
+                message=f"🤖 AUTO-REGISTERED: Person {person_id} entered",
+                person_id=person_id,
+                camera_source="entry",
+            )
+
+            print(f"🤖 AUTO-REGISTERED: Person {person_id} at ENTRY camera")
+
+            # Add visual notification
+            self.notification_queue.append(
+                (f"AUTO-REGISTERED: {person_id}", current_time, (0, 255, 0))
+            )
+
+    def manual_register_at_entry(self):
+        """Manually register a person detected at entry camera (force override)."""
         ret, frame = self.entry_cap.read()
         if not ret:
             print("❌ Failed to capture from entry camera")
@@ -204,7 +290,7 @@ class ThreeCameraDemo:
         timestamp = time.time()
 
         # Store in database
-        self.database.record_entry(person_id, timestamp)
+        self.database.record_entry(person_id)
 
         # Store locally
         self.registered_people[person_id] = {
@@ -219,13 +305,14 @@ class ThreeCameraDemo:
 
         # Create alert
         self.alert_manager.create_alert(
-            AlertLevel.INFO,
-            f"Person {person_id} registered at ENTRY",
+            alert_type=AlertType.UNAUTHORIZED_ENTRY,
+            alert_level=AlertLevel.INFO,
+            message=f"👤 MANUAL REGISTRATION: Person {person_id} at ENTRY",
             person_id=person_id,
-            location="entry",
+            camera_source="entry",
         )
 
-        print(f"✅ Person {person_id} registered at ENTRY camera")
+        print(f"✅ MANUAL: Person {person_id} registered at ENTRY camera")
 
     def register_person_at_exit(self):
         """Register a person detected at exit camera (for testing)."""
@@ -247,31 +334,75 @@ class ThreeCameraDemo:
         self.stats["exit_detections"] += 1
 
     def process_entry_camera(self, frame):
-        """Process entry camera frame."""
+        """Process entry camera frame with AUTO-REGISTRATION."""
+        # Auto-register any detected faces
+        self.auto_register_at_entry(frame)
+
         faces = self.entry_tracker.detect_faces(frame)
 
         for x, y, w, h in faces:
             # Draw bounding box
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 3)
+
+            # Draw label with background for better visibility
+            label = "AUTO-ENTRY"
+            label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+            label_w, label_h = label_size
+
+            # Draw background rectangle for label
+            cv2.rectangle(
+                frame, (x, y - label_h - 10), (x + label_w + 10, y), (0, 255, 0), -1
+            )
+
+            # Draw text on background
             cv2.putText(
                 frame,
-                "ENTRY",
-                (x, y - 10),
+                label,
+                (x + 5, y - 5),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
+                0.8,
+                (0, 0, 0),
                 2,
             )
 
-        # Add instructions
+        # Add status message
         cv2.putText(
             frame,
-            "Press 'e' to register person",
+            f"AUTO-REGISTER MODE | Total: {self.stats['registered_people']}",
             (10, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
-            (255, 255, 255),
+            (0, 255, 0),
             2,
+        )
+
+        # Draw notifications
+        self._draw_notifications(frame)
+
+        # Draw manual override button
+        button_x, button_y, button_w, button_h = 10, 50, 200, 40
+        cv2.rectangle(
+            frame,
+            (button_x, button_y),
+            (button_x + button_w, button_y + button_h),
+            (0, 200, 0),
+            -1,
+        )
+        cv2.rectangle(
+            frame,
+            (button_x, button_y),
+            (button_x + button_w, button_y + button_h),
+            (0, 255, 0),
+            2,
+        )
+        cv2.putText(
+            frame,
+            "FORCE REGISTER (R)",
+            (button_x + 10, button_y + 27),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
         )
 
         return frame
@@ -302,20 +433,35 @@ class ThreeCameraDemo:
                         matched_id = person_id
 
             if matched_id:
-                # Person exiting
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
+                # Person exiting - draw with prominent label
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 3)
+
+                label = f"EXIT: {matched_id}"
+                label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+                label_w, label_h = label_size
+
+                # Draw background rectangle for label
+                cv2.rectangle(
+                    frame,
+                    (x, y - label_h - 10),
+                    (x + label_w + 10, y),
+                    (0, 255, 255),
+                    -1,
+                )
+
+                # Draw text on background
                 cv2.putText(
                     frame,
-                    f"EXIT: {matched_id}",
-                    (x, y - 10),
+                    label,
+                    (x + 5, y - 5),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 255),
+                    0.8,
+                    (0, 0, 0),
                     2,
                 )
 
                 # Record exit
-                self.database.record_exit(matched_id, time.time())
+                self.database.record_exit(matched_id)
 
                 # Remove from inside tracking
                 if matched_id in self.inside_people:
@@ -325,21 +471,37 @@ class ThreeCameraDemo:
 
                 # Alert
                 self.alert_manager.create_alert(
-                    AlertLevel.INFO,
-                    f"Person {matched_id} exited",
+                    alert_type=AlertType.UNAUTHORIZED_ENTRY,
+                    alert_level=AlertLevel.INFO,
+                    message=f"Person {matched_id} exited",
                     person_id=matched_id,
-                    location="exit",
+                    camera_source="exit",
                 )
             else:
                 # Unknown person at exit
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 165, 255), 2)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 165, 255), 3)
+
+                label = "UNKNOWN"
+                label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+                label_w, label_h = label_size
+
+                # Draw background rectangle for label
+                cv2.rectangle(
+                    frame,
+                    (x, y - label_h - 10),
+                    (x + label_w + 10, y),
+                    (0, 165, 255),
+                    -1,
+                )
+
+                # Draw text on background
                 cv2.putText(
                     frame,
-                    "UNKNOWN",
-                    (x, y - 10),
+                    label,
+                    (x + 5, y - 5),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 165, 255),
+                    0.8,
+                    (255, 255, 255),
                     2,
                 )
 
@@ -397,18 +559,19 @@ class ThreeCameraDemo:
                     # Check for running (velocity threshold)
                     if velocity > 2.0:  # meters per second
                         self.alert_manager.create_alert(
-                            AlertLevel.WARNING,
-                            f"Person {matched_id} running detected (velocity: {velocity:.2f} m/s)",
+                            alert_type=AlertType.RUNNING,
+                            alert_level=AlertLevel.WARNING,
+                            message=f"Person {matched_id} running detected (velocity: {velocity:.2f} m/s)",
                             person_id=matched_id,
-                            location="room",
+                            camera_source="room",
                         )
 
                 # Draw trajectory
                 self._draw_trajectory(frame, matched_id)
 
                 # Record in database
-                self.database.update_trajectory(
-                    matched_id, center_x, center_y, current_time
+                self.database.add_trajectory_point(
+                    person_id=matched_id, x=center_x, y=center_y, camera_source="room"
                 )
 
             else:
@@ -420,15 +583,42 @@ class ThreeCameraDemo:
 
                 # Create alert
                 self.alert_manager.create_alert(
-                    AlertLevel.CRITICAL,
-                    f"UNAUTHORIZED person detected in room at ({center_x}, {center_y})",
-                    location="room",
+                    alert_type=AlertType.UNAUTHORIZED_ENTRY,
+                    alert_level=AlertLevel.CRITICAL,
+                    message=f"UNAUTHORIZED person detected in room at ({center_x}, {center_y})",
+                    camera_source="room",
                 )
 
-            # Draw bounding box
-            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+            # Draw bounding box with thicker line
+            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 3)
+
+            # Draw label with background box for better visibility
+            label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+            label_w, label_h = label_size
+
+            # Background color (same as bounding box)
+            bg_color = color
+
+            # Text color (contrasting - white for red, black for green)
+            if matched_id:
+                text_color = (0, 0, 0)  # Black text on green background
+            else:
+                text_color = (255, 255, 255)  # White text on red background
+
+            # Draw filled rectangle as background for label
+            cv2.rectangle(
+                frame, (x, y - label_h - 15), (x + label_w + 15, y), bg_color, -1
+            )
+
+            # Draw the label text
             cv2.putText(
-                frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2
+                frame,
+                label,
+                (x + 7, y - 7),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                text_color,
+                2,
             )
 
             # Draw center point
@@ -439,9 +629,10 @@ class ThreeCameraDemo:
         # Check for mass gathering
         if len(faces) >= 5:
             self.alert_manager.create_alert(
-                AlertLevel.WARNING,
-                f"Mass gathering detected: {len(faces)} people in room",
-                location="room",
+                alert_type=AlertType.MASS_GATHERING,
+                alert_level=AlertLevel.WARNING,
+                message=f"Mass gathering detected: {len(faces)} people in room",
+                camera_source="room",
             )
 
         return frame
@@ -519,14 +710,18 @@ class ThreeCameraDemo:
         # Background
         panel[:] = (40, 40, 40)
 
-        # Title
+        # Title with AUTO indicator
+        title = f"{camera_name} CAMERA"
+        if camera_name == "ENTRY":
+            title += " 🤖 AUTO"
+
         cv2.putText(
             panel,
-            f"{camera_name} CAMERA",
+            title,
             (10, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
-            (255, 255, 255),
+            (0, 255, 0) if camera_name == "ENTRY" else (255, 255, 255),
             2,
         )
 
@@ -566,6 +761,56 @@ class ThreeCameraDemo:
         # Combine
         return np.vstack([panel, frame])
 
+    def _draw_notifications(self, frame):
+        """Draw notification messages on frame."""
+        current_time = time.time()
+
+        # Remove expired notifications
+        self.notification_queue = [
+            (msg, ts, color)
+            for msg, ts, color in self.notification_queue
+            if current_time - ts < self.notification_duration
+        ]
+
+        # Draw active notifications
+        y_offset = frame.shape[0] - 60
+        for msg, ts, color in self.notification_queue:
+            # Calculate fade based on age
+            age = current_time - ts
+            alpha = 1.0 - (age / self.notification_duration)
+
+            # Draw semi-transparent background
+            text_size, _ = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+            text_w, text_h = text_size
+
+            # Background box
+            padding = 15
+            box_x1 = frame.shape[1] - text_w - padding * 2 - 20
+            box_y1 = y_offset - text_h - padding
+            box_x2 = frame.shape[1] - 20
+            box_y2 = y_offset + padding
+
+            # Draw background with transparency effect
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (box_x1, box_y1), (box_x2, box_y2), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+
+            # Draw border
+            cv2.rectangle(frame, (box_x1, box_y1), (box_x2, box_y2), color, 2)
+
+            # Draw text
+            cv2.putText(
+                frame,
+                msg,
+                (box_x1 + padding, y_offset),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                color,
+                2,
+            )
+
+            y_offset -= text_h + padding * 2 + 10
+
     def run(self):
         """Main loop."""
         print("🎥 Starting three-camera monitoring system...\n")
@@ -602,6 +847,10 @@ class ThreeCameraDemo:
                 frame_exit = self.draw_stats_panel(frame_exit, "EXIT")
                 frame_room = self.draw_stats_panel(frame_room, "ROOM")
 
+                # Draw notifications on all frames
+                self._draw_notifications(frame_exit)
+                self._draw_notifications(frame_room)
+
                 # Display all three windows
                 cv2.imshow("Entry Camera", frame_entry)
                 cv2.imshow("Exit Camera", frame_exit)
@@ -613,8 +862,9 @@ class ThreeCameraDemo:
                 if key == ord("q"):
                     print("\n✅ Quit command received...")
                     break
-                elif key == ord("e"):
-                    self.register_person_at_entry()
+                elif key == ord("r"):
+                    # Manual override - force register
+                    self.manual_register_at_entry()
                 elif key == ord("x"):
                     self.register_person_at_exit()
 
@@ -650,7 +900,7 @@ class ThreeCameraDemo:
         print("=" * 60)
 
         # Alert statistics
-        alert_stats = self.alert_manager.get_statistics()
+        alert_stats = self.alert_manager.get_stats()
         print("\nALERT STATISTICS:")
         print(f"  Total Alerts: {alert_stats['total_alerts']}")
         print(f"  Info:         {alert_stats['by_level'].get('info', 0)}")
