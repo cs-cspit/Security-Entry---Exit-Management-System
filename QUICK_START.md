@@ -1,9 +1,38 @@
-# Quick Start Guide - Three Camera System
+# Quick Start Guide - YOLO Security System
 ## Get Up and Running in 5 Minutes
 
 ---
 
 ## 🚀 Fast Track Setup
+
+### Step 0: Download YOLO Models (1 minute - FIRST TIME ONLY)
+
+**Required before first run:**
+
+```bash
+cd "Security Entry & Exit Management System"
+source venv/bin/activate
+python download_yolo_face.py
+```
+
+**Expected Output:**
+```
+📥 Downloading YOLOv8n-face model (6 MB)...
+✅ Download complete!
+✅ SETUP COMPLETE!
+```
+
+**If auto-download fails:**
+1. Visit: https://github.com/derronqi/yolov8-face/releases
+2. Download `yolov8n-face.pt` (6 MB)
+3. Place it in the project root directory
+
+**OR use Hugging Face:**
+1. Visit: https://huggingface.co/Bingsu/yolov8n-face
+2. Download `yolov8n-face.pt`
+3. Place it in the project root directory
+
+---
 
 ### Step 1: Connect Your Cameras (2 minutes)
 
@@ -43,16 +72,35 @@ Total cameras found: 3
 If you see **3 cameras** → Continue to Step 3 ✅  
 If you see **2 or fewer** → See [Troubleshooting](#troubleshooting) below ⚠️
 
-### Step 3: Run the System (30 seconds)
+### Step 3: Run the YOLO System (30 seconds)
 
+**Option A: Automated Quick Start (Recommended)**
 ```bash
-python demo_three_cameras.py
+./quick_start.sh
 ```
 
-**You should see 3 windows open:**
-- Entry Camera (green labels)
+This script will:
+- Check and install all dependencies
+- Download missing YOLO models
+- Run the demo automatically
+
+**Option B: Manual Start**
+```bash
+python demo_yolo_cameras.py
+```
+
+**You should see:**
+```
+🔧 Initializing YOLO detectors...
+✅ YOLOv8-face model loaded successfully
+✅ YOLOv11 model loaded successfully
+✅ Multi-modal re-ID system initialized
+```
+
+**Then 3 windows open:**
+- Entry Camera (green labels with face/body detection)
 - Exit Camera (yellow labels)
-- Room Camera (green/red labels)
+- Room Camera (green/red labels with trajectories)
 
 ### Step 4: Test the System (2 minutes)
 
@@ -63,17 +111,28 @@ python demo_three_cameras.py
 
 2. **Test Room Tracking:**
    - Move to Room Camera view
-   - Your face should have a **GREEN** box (authorized)
-   - You should see a **PURPLE** trajectory trail
+   - Your face/body should have a **GREEN** box (authorized)
+   - You should see:
+     - Face detection box (if visible)
+     - Body detection box (if visible)
+     - **PURPLE** trajectory trail
+     - Match score in console (e.g., "Match: 0.72")
 
 3. **Test Unauthorized Detection:**
    - Have someone else (not registered) appear in Room Camera
    - Their face should have a **RED** box (unauthorized)
    - Alert should trigger: "UNAUTHORIZED person detected"
 
-4. **Quit and Export:**
+4. **Check Console Output:**
+   ```
+   [INFO] AUTO-REGISTERED: P001 (face+body profile created)
+   [INFO] ROOM MATCH: P001 | Similarity: 0.68 | Mode: both
+   [INFO] Detection: face=0.89, body=0.82
+   ```
+
+5. **Quit and Export:**
    - Press `q` key
-   - Session data saved to: `data/session_YYYYMMDD_HHMMSS.json`
+   - Session data saved to: `data/yolo_session_YYYYMMDD_HHMMSS.json`
 
 ---
 
@@ -124,20 +183,56 @@ python demo_three_cameras.py
 
 ### Console Output
 ```
+============================================================
+YOLO-BASED THREE-CAMERA MONITORING SYSTEM
+============================================================
+Using YOLOv8-face + YOLOv11 + Multi-Modal Re-ID
+
+🔧 Initializing YOLO detectors...
+✅ YOLOv8-face model loaded successfully
+✅ YOLOv11 model loaded successfully
+✅ Multi-modal re-ID system initialized
+
 ✅ Camera detection complete
 ✅ Entry camera (index 0): READY
-✅ Exit camera (index 1): READY
 ✅ Room camera (index 2): READY
+✅ Exit camera (index 1): READY
 
-[INFO] Person P001 registered at ENTRY
-[INFO] Person P001 detected in room
-[WARNING] Person P001 running detected (velocity: 2.3 m/s)
-[CRITICAL] UNAUTHORIZED person detected in room
+[INFO] AUTO-REGISTERED: P001
+  Face features: ✓ | Body features: ✓
+[INFO] ROOM MATCH: P001 | Similarity: 0.68 | Mode: both
+  Face: 0.72 | Body: 0.65 | Combined: 0.68
+[WARNING] UNAUTHORIZED person detected in room
 ```
 
 ---
 
 ## ⚠️ Troubleshooting
+
+### Problem: Model Download Failed
+
+**Error:** `Failed to load YOLOv8-face model: [Errno 2] No such file or directory: 'yolov8n-face.pt'`
+
+**Fix:**
+```bash
+# Run the download script
+python download_yolo_face.py
+
+# If that fails, manual download:
+# 1. Visit: https://github.com/derronqi/yolov8-face/releases
+# 2. Download yolov8n-face.pt
+# 3. Place in project root
+```
+
+### Problem: Import Error - ultralytics
+
+**Error:** `ultralytics package not found`
+
+**Fix:**
+```bash
+source venv/bin/activate
+pip install ultralytics torch torchvision opencv-python
+```
 
 ### Problem: Only 2 Cameras Detected
 
@@ -217,8 +312,9 @@ sudo killall VDCAssistant
 If you can't get the third camera working, you can still run the system:
 
 ```bash
-# 2-camera mode (Entry + Room only)
-python demo_entry_room.py
+# 2-camera mode (Entry + Room only with YOLO)
+python demo_yolo_cameras.py
+# Will work with 2 cameras, just ignore exit camera
 ```
 
 This uses:
@@ -231,20 +327,24 @@ This uses:
 
 ```
 Data Storage:
-├── data/three_camera_demo.db          # SQLite database
-├── data/three_camera_alerts.log       # Alert history
-└── data/session_YYYYMMDD_HHMMSS.json  # Exported session
+├── data/yolo_camera_demo.db               # SQLite database
+├── data/yolo_camera_alerts.log            # Alert history
+└── data/yolo_session_YYYYMMDD_HHMMSS.json # Exported session
+
+YOLO Models (6-20 MB each):
+├── yolov8n-face.pt    # Face detection model
+└── yolo11n.pt         # Body detection model (auto-downloads)
 
 View Data:
 # Database
-sqlite3 data/three_camera_demo.db
+sqlite3 data/yolo_camera_demo.db
 sqlite> SELECT * FROM entries;
 
 # Alerts
-cat data/three_camera_alerts.log
+cat data/yolo_camera_alerts.log
 
 # Session
-cat data/session_*.json
+cat data/yolo_session_*.json
 ```
 
 ---
@@ -259,7 +359,7 @@ If cameras are detected in different order:
 # Find your camera indices
 python scripts/detect_cameras.py
 
-# Edit demo_three_cameras.py line 714:
+# Edit demo_yolo_cameras.py line 736:
 entry_idx = 0  # Change to your entry camera
 exit_idx = 1   # Change to your exit camera
 room_idx = 2   # Change to your room camera
@@ -267,17 +367,25 @@ room_idx = 2   # Change to your room camera
 
 ### Adjust Sensitivity
 
-Edit `demo_three_cameras.py`:
+Edit `demo_yolo_cameras.py`:
 
 ```python
-# Line 101 - More strict matching (fewer false positives)
-similarity_threshold=0.70  # Default: 0.60
+# Line 68-70 - YOLO confidence thresholds
+face_detector = YOLOv8FaceDetector(
+    model_path="yolov8n-face.pt",
+    confidence_threshold=0.5,  # Default: 0.5, Range: 0.3-0.7
+)
+body_detector = YOLOv11BodyDetector(
+    model_path="yolo11n.pt",
+    confidence_threshold=0.4,  # Default: 0.4, Range: 0.3-0.6
+)
 
-# Line 516 - Velocity threshold for running detection
-if velocity > 3.0:  # Default: 2.0 m/s
-
-# Line 446 - Mass gathering threshold
-if len(faces) >= 10:  # Default: 5 people
+# Line 84-87 - Multi-modal re-ID weights
+reid_system = MultiModalReID(
+    face_weight=0.6,      # Default: 0.6, increase if faces are clear
+    body_weight=0.4,      # Default: 0.4, increase for far-away people
+    match_threshold=0.45, # Default: 0.45, Range: 0.35-0.60
+)
 ```
 
 ---
@@ -286,50 +394,78 @@ if len(faces) >= 10:  # Default: 5 people
 
 After running the system, verify:
 
+- [ ] YOLO models downloaded (yolov8n-face.pt present)
 - [ ] Three windows opened (Entry, Exit, Room)
 - [ ] All windows show live video
-- [ ] Stats panels display at top of each window
-- [ ] Pressing `e` registers a person (UUID assigned)
+- [ ] Console shows "YOLO detectors initialized"
+- [ ] Pressing `e` registers a person with face+body profile
+- [ ] Console shows "AUTO-REGISTERED: P001"
 - [ ] Registered person shows **GREEN** box in Room camera
+- [ ] Console shows match scores (e.g., "Similarity: 0.68")
 - [ ] Unregistered person shows **RED** box in Room camera
+- [ ] Both face and body detection boxes visible
 - [ ] Purple trajectory trails appear
-- [ ] Console shows alerts
+- [ ] Console shows detection modes (face_only/body_only/both)
 - [ ] Pressing `q` exports session data
 - [ ] JSON file created in `data/` folder
 
-**All checked?** → 🎉 **Phase 2 Complete!** System is working!
+**All checked?** → 🎉 **YOLO System Working!** Multi-modal re-ID active!
 
 ---
 
 ## 📚 Next Steps
 
 ### Learn More:
-- **Full Setup Guide:** `CAMERA_SETUP_GUIDE.md`
-- **Complete Documentation:** `PHASE2_COMPLETE.md`
-- **Usage Guide:** `PHASE2_USAGE_GUIDE.md`
+- **YOLO System Documentation:** `RUN_YOLO_SYSTEM.md`
+- **Critical Fix & Upgrade Guide:** `CRITICAL_FIX_AND_YOLO_UPGRADE.md`
+- **Camera Setup:** `CAMERA_SETUP_GUIDE.md`
 
 ### Improve Accuracy:
-- Ensure **good lighting** in all camera views
+- Ensure **good lighting** in all camera views (YOLO needs light)
 - Use **USB connection** for stability
-- **Calibrate** pixels_per_meter for your room
-- **Adjust** similarity_threshold based on testing
+- **Tune YOLO confidence** thresholds (face: 0.3-0.7, body: 0.3-0.6)
+- **Adjust face/body weights** based on your camera positions
+  - Close cameras with clear faces: face_weight=0.7, body_weight=0.3
+  - Far cameras / body-focused: face_weight=0.4, body_weight=0.6
+- **Lower match_threshold** if too many false negatives (0.35-0.40)
+- **Raise match_threshold** if too many false positives (0.50-0.55)
 
-### Phase 3 (Coming Next):
-- Face embeddings (95%+ accuracy)
+### Current System (YOLO-based):
+- ✅ YOLOv8-face detection (high accuracy face detection)
+- ✅ YOLOv11 body detection (person detection)
+- ✅ Multi-modal re-identification (face + body features)
+- ✅ Weighted similarity matching
+- ✅ Auto-registration at entry
+- ✅ Real-time tracking and alerts
+
+### Future Enhancements:
+- Face embeddings with ArcFace (98%+ accuracy)
 - Kalman filtering for smooth trajectories
-- Multi-person tracking (ByteTrack)
-- Advanced analytics and threat detection
+- ByteTrack for multi-person occlusion handling
+- Advanced threat scoring and behavior analysis
 
 ---
 
 ## 🆘 Still Having Issues?
 
-1. **Read the detailed guide:**
+1. **Check model files:**
    ```bash
-   cat CAMERA_SETUP_GUIDE.md
+   ls -lh yolov8n-face.pt yolo11n.pt
+   # Should see yolov8n-face.pt (~6 MB)
    ```
 
-2. **Run interactive debug:**
+2. **Re-run download script:**
+   ```bash
+   python download_yolo_face.py
+   ```
+
+3. **Read the detailed guide:**
+   ```bash
+   cat RUN_YOLO_SYSTEM.md
+   cat CRITICAL_FIX_AND_YOLO_UPGRADE.md
+   ```
+
+4. **Run interactive debug:**
    ```bash
    python scripts/debug_second_camera.py
    ```
@@ -341,12 +477,13 @@ After running the system, verify:
    pip list | grep opencv
    ```
 
-4. **Nuclear option (restart everything):**
+5. **Nuclear option (restart everything):**
    ```bash
    # Close all apps
    # Restart MacBook
    # Reconnect cameras
-   # Run: python demo_three_cameras.py
+   # Re-download models: python download_yolo_face.py
+   # Run: python demo_yolo_cameras.py
    ```
 
 ---
@@ -366,14 +503,15 @@ After running the system, verify:
 ## 🎊 System Status
 
 ```
-Phase 1: Database & Alerts        ✅ COMPLETE
-Phase 2: Three-Camera Tracking    ✅ COMPLETE (YOU ARE HERE)
-Phase 3: Advanced Analytics       🔄 NEXT
+Phase 1: Database & Alerts              ✅ COMPLETE
+Phase 2: Three-Camera Tracking          ✅ COMPLETE
+Phase 2.5: YOLO Multi-Modal Re-ID       ✅ COMPLETE (YOU ARE HERE)
+Phase 3: Embeddings & Advanced Tracking 🔄 NEXT
 ```
 
-**Ready to test?** Run: `python demo_three_cameras.py`
+**Ready to test?** Run: `./quick_start.sh` or `python demo_yolo_cameras.py`
 
 ---
 
-*Quick Start Guide | Phase 2 Implementation*
-*System: Three-Camera Entry/Exit/Room Monitoring*
+*Quick Start Guide | YOLO System*
+*System: Multi-Modal Face+Body Re-Identification with YOLOv8 & YOLOv11*

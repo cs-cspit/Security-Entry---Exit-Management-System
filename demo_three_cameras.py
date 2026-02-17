@@ -105,7 +105,8 @@ class ThreeCameraDemo:
             grace_period_seconds=3.0, similarity_threshold=0.60
         )
         self.room_tracker = SimpleFaceTracker(
-            grace_period_seconds=2.0, similarity_threshold=0.65
+            grace_period_seconds=2.0,
+            similarity_threshold=0.50,  # LOWERED for better matching
         )
 
         # Open cameras
@@ -642,10 +643,20 @@ class ThreeCameraDemo:
         best_match_id = None
         best_similarity = 0.0
 
+        # DEBUG: Print all registered people
+        if len(self.registered_people) == 0:
+            print("⚠️  WARNING: No registered people to match against!")
+            return None
+
         for person_id, person_info in self.registered_people.items():
             registered_features = person_info["features"]
             similarity = self.room_tracker._compare_histograms(
                 features, registered_features
+            )
+
+            # DEBUG: Print similarity scores
+            print(
+                f"🔍 Matching against {person_id}: similarity = {similarity:.3f} (threshold: {self.room_tracker.similarity_threshold:.3f})"
             )
 
             if (
@@ -654,6 +665,15 @@ class ThreeCameraDemo:
             ):
                 best_similarity = similarity
                 best_match_id = person_id
+
+        if best_match_id:
+            print(
+                f"✅ MATCH FOUND: {best_match_id} with similarity {best_similarity:.3f}"
+            )
+        else:
+            print(
+                f"❌ NO MATCH: Best similarity was {best_similarity:.3f}, threshold is {self.room_tracker.similarity_threshold:.3f}"
+            )
 
         return best_match_id
 

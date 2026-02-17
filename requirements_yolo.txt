@@ -1,0 +1,27 @@
+# Core dependencies
+opencv-python>=4.8.0
+numpy>=1.24.0
+pyyaml>=6.0
+
+# YOLO models (Ultralytics)
+ultralytics>=8.2.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# For Mac M1/M2/M3 GPU support (optional, uncomment if using Apple Silicon)
+# --extra-index-url https://download.pytorch.org/whl/cpu
+
+# Database
+sqlite3  # Built-in with Python
+
+# Additional utilities
+Pillow>=10.0.0
+scipy>=1.11.0
+
+# For development/debugging
+matplotlib>=3.7.0
+
+# Note: For YOLOv8-face, you'll need to download the pre-trained model:
+# wget https://github.com/akanametov/yolov8-face/releases/download/v0.0.0/yolov8n-face.pt
+#
+# Or the model will auto-download on first run from Ultralytics hub
