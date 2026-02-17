@@ -86,9 +86,14 @@ class YOLOThreeCameraSystem:
         self.alert_manager = AlertManager()
         self.database = EnhancedDatabase()
 
-        # Person database
+        # Person database with session tracking
         self.registered_people = {}  # {person_id: profile}
         self.inside_people = {}  # {person_id: last_seen_time}
+        self.active_sessions = {}  # {person_id: session_id} - ONLY active entries
+        self.person_status = {}  # {person_id: 'active' or 'exited'}
+
+        # Session counter for unique session IDs
+        self.session_counter = 0
 
         # Tracking data
         self.trajectories = defaultdict(list)
@@ -204,6 +209,10 @@ class YOLOThreeCameraSystem:
                 # New person - register
                 person_id = f"P{len(self.registered_people) + 1:03d}"
 
+                # 🔒 SECURITY: Create new session for this entry
+                self.session_counter += 1
+                session_id = f"S{self.session_counter:04d}"
+
                 # Create full profile
                 profile = self.reid_system.create_person_profile(
                     person_id=person_id,
@@ -219,6 +228,10 @@ class YOLOThreeCameraSystem:
                 self.database.record_entry(person_id)
                 self.inside_people[person_id] = current_time
 
+                # 🔒 SECURITY: Activate session
+                self.active_sessions[person_id] = session_id
+                self.person_status[person_id] = "active"
+
                 # Update stats
                 self.stats["registered_people"] += 1
                 self.stats["people_inside"] += 1
@@ -231,15 +244,53 @@ class YOLOThreeCameraSystem:
 
                 # Log
                 print(
-                    f"🤖 AUTO-REGISTERED: {person_id} | Face conf: {conf:.2f} | Mode: {details.get('mode_used', 'N/A')}"
+                    f"🤖 AUTO-REGISTERED: {person_id} (Session {session_id}) | Face conf: {conf:.2f} | Mode: {details.get('mode_used', 'N/A')}"
                 )
+                print(f"🔒 Active session created: {session_id} for {person_id}")
 
                 # Alert
                 self.alert_manager.create_alert(
                     alert_type=AlertType.UNAUTHORIZED_ENTRY,
                     alert_level=AlertLevel.INFO,
-                    message=f"🤖 AUTO-REGISTERED: Person {person_id} entered",
+                    message=f"🤖 AUTO-REGISTERED: Person {person_id} entered (Session {session_id})",
                     person_id=person_id,
+                    camera_source="entry",
+                )
+
+                # Update cooldown
+                self.entry_cooldown[face_key] = current_time
+            elif matched_id and self.person_status.get(matched_id) == "exited":
+                # 🔒 SECURITY: Known person RE-ENTERING after exit - create NEW session
+                self.session_counter += 1
+                session_id = f"S{self.session_counter:04d}"
+
+                # Re-activate this person with new session
+                self.inside_people[matched_id] = current_time
+                self.active_sessions[matched_id] = session_id
+                self.person_status[matched_id] = "active"
+
+                # Record new entry in database
+                self.database.record_entry(matched_id)
+                self.stats["people_inside"] += 1
+
+                # Add notification
+                notification = f"↩️ {matched_id} RE-ENTERED (New Session)"
+                self.notification_queue.append(
+                    (notification, current_time, (0, 255, 255))
+                )
+
+                # Log
+                print(
+                    f"↩️ RE-ENTRY: {matched_id} (New Session {session_id}) | Previous session was closed"
+                )
+                print(f"🔒 New active session created: {session_id} for {matched_id}")
+
+                # Alert
+                self.alert_manager.create_alert(
+                    alert_type=AlertType.UNAUTHORIZED_ENTRY,
+                    alert_level=AlertLevel.INFO,
+                    message=f"↩️ RE-ENTRY: {matched_id} entered (New Session {session_id})",
+                    person_id=matched_id,
                     camera_source="entry",
                 )
 
@@ -350,8 +401,22 @@ class YOLOThreeCameraSystem:
                 query_profile, self.registered_people, mode="auto"
             )
 
+            # 🔒 SECURITY CHECK: Verify person has ACTIVE session
+            is_authorized = False
             if matched_id:
-                # Authorized person
+                if (
+                    matched_id in self.active_sessions
+                    and self.person_status.get(matched_id) == "active"
+                ):
+                    # Person has valid active session - AUTHORIZED
+                    is_authorized = True
+                else:
+                    # Person was registered before but has no active session
+                    # This means they exited and are now bypassing entry - THREAT!
+                    matched_id = None  # Treat as unmatched/unauthorized
+
+            if is_authorized and matched_id:
+                # Authorized person with active session
                 color = (0, 255, 0)
                 label = matched_id
 
@@ -405,9 +470,25 @@ class YOLOThreeCameraSystem:
                 )
 
             else:
-                # Unauthorized person
+                # Unauthorized person (either never registered OR exited and bypassing entry)
                 color = (0, 0, 255)
-                label = "UNAUTHORIZED"
+
+                # Check if this is a known person who exited
+                if matched_id and self.person_status.get(matched_id) == "exited":
+                    label = f"THREAT: {matched_id} (BYPASSED ENTRY)"
+                    threat_msg = f"🚨 CRITICAL: {matched_id} detected in room WITHOUT re-entry! Previous session ended."
+                    print(threat_msg)
+
+                    # Critical alert
+                    self.alert_manager.add_alert(
+                        alert_type=AlertType.UNAUTHORIZED_ENTRY,
+                        person_id=matched_id,
+                        camera_source="room",
+                        description=f"SECURITY BREACH: {matched_id} bypassed entry after exit",
+                        level=AlertLevel.CRITICAL,
+                    )
+                else:
+                    label = "UNAUTHORIZED"
 
                 self.stats["unauthorized_detections"] += 1
 
@@ -544,6 +625,12 @@ class YOLOThreeCameraSystem:
                 # Record exit
                 self.database.record_exit(matched_id)
 
+                # 🔒 SECURITY: Invalidate session and mark as exited
+                session_id = self.active_sessions.get(matched_id, "N/A")
+                if matched_id in self.active_sessions:
+                    del self.active_sessions[matched_id]
+                self.person_status[matched_id] = "exited"
+
                 # Remove from inside tracking
                 del self.inside_people[matched_id]
                 self.stats["people_exited"] += 1
@@ -555,7 +642,12 @@ class YOLOThreeCameraSystem:
                     (notification, current_time, (0, 255, 255))
                 )
 
-                print(f"👋 EXIT DETECTED: {matched_id} | Similarity: {similarity:.3f}")
+                print(
+                    f"👋 EXIT DETECTED: {matched_id} (Session {session_id} ended) | Similarity: {similarity:.3f}"
+                )
+                print(
+                    f"🔒 Authorization revoked for {matched_id} - must re-enter through ENTRY camera"
+                )
 
                 # Draw MATCHED detection (green, thicker)
                 cv2.rectangle(frame, (x, y), (x + w, y + h), color, 3)
@@ -778,6 +870,7 @@ class YOLOThreeCameraSystem:
         print(f"Unauthorized Detections:  {self.stats['unauthorized_detections']}")
         print(f"Total Detections:         {self.stats['total_detections']}")
         print(f"Currently Inside:         {len(self.inside_people)}")
+        print(f"Active Sessions:          {len(self.active_sessions)}")
         print("=" * 60)
 
         # Alert stats
