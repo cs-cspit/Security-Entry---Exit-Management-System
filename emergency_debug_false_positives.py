@@ -46,7 +46,7 @@ def test_two_people():
         face_weight=0.6,
         body_weight=0.4,
         similarity_threshold=0.65,
-        confidence_gap=0.12,
+        confidence_gap=0.05,
         body_only_threshold=0.60,
     )
     print()

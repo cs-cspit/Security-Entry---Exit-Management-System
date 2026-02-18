@@ -80,7 +80,7 @@ class YOLOThreeCameraSystem:
             face_weight=0.6,
             body_weight=0.4,
             similarity_threshold=0.65,  # For face+body matching (RAISED - prevent false positives)
-            confidence_gap=0.12,  # Require clear winner between matches (BALANCED)
+            confidence_gap=0.05,  # Require clear winner between matches (LENIENT - histograms too similar)
             body_only_threshold=0.60,  # Body-only threshold (RAISED - critical for security)
         )
 

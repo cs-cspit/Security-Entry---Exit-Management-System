@@ -23,7 +23,7 @@ class MultiModalReID:
         face_weight: float = 0.6,
         body_weight: float = 0.4,
         similarity_threshold: float = 0.65,  # Face+body threshold (STRICT)
-        confidence_gap: float = 0.12,  # Gap between 1st and 2nd match (BALANCED)
+        confidence_gap: float = 0.05,  # Gap between 1st and 2nd match (LENIENT - histograms too similar)
         body_only_threshold: float = 0.60,  # Body-only threshold (RAISED - prevent false positives)
     ):
         """
