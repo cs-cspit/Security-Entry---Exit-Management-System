@@ -75,11 +75,13 @@ class YOLOThreeCameraSystem:
             print("   3. Haar Cascade (built-in) will be used as last resort")
             raise
 
-        # Initialize multi-modal re-ID system
+        # Initialize multi-modal re-ID system with BODY-PRIMARY matching (STRICT THRESHOLDS)
         self.reid_system = MultiModalReID(
             face_weight=0.6,
             body_weight=0.4,
-            similarity_threshold=0.45,  # Lower threshold for multi-modal
+            similarity_threshold=0.65,  # For face+body matching (RAISED - prevent false positives)
+            confidence_gap=0.12,  # Require clear winner between matches (BALANCED)
+            body_only_threshold=0.60,  # Body-only threshold (RAISED - critical for security)
         )
 
         # Initialize alert manager and database
@@ -401,19 +403,64 @@ class YOLOThreeCameraSystem:
                 query_profile, self.registered_people, mode="auto"
             )
 
+            # 🔒 CRITICAL SECURITY LOGGING: Show ALL similarity scores
+            print(f"\n{'=' * 60}")
+            print(f"🔍 ROOM CAMERA DETECTION:")
+            print(f"   Query body conf: {conf:.2f}")
+            print(f"   Query has face: {matching_face is not None}")
+
+            # Log ALL registered people and their scores
+            print(f"\n📊 Similarity scores against ALL registered people:")
+            for pid, profile in self.registered_people.items():
+                test_sim, test_details = self.reid_system.compare_profiles(
+                    query_profile, profile, mode="auto"
+                )
+                print(
+                    f"   {pid}: Combined={test_sim:.3f} | Face={test_details.get('face_similarity', 0):.3f} | Body={test_details.get('body_similarity', 0):.3f}"
+                )
+            print(f"{'=' * 60}\n")
+
             # 🔒 SECURITY CHECK: Verify person has ACTIVE session
             is_authorized = False
+
+            # Log matching details for debugging
             if matched_id:
+                match_reason = details.get("reason", "N/A")
+                confidence_level = details.get("confidence_level", "N/A")
+                matching_mode = details.get("matching_mode", "N/A")
+                print(f"🔍 MATCH DETECTED: {matched_id} | Mode: {matching_mode}")
+                print(
+                    f"   Similarity: {similarity:.3f} | Reason: {match_reason} | Confidence: {confidence_level}"
+                )
+                print(
+                    f"   Face: {details.get('face_similarity', 0.0):.3f} | Body: {details.get('body_similarity', 0.0):.3f}"
+                )
+                print(f"   Threshold used: {details.get('threshold_used', 'N/A'):.3f}")
+
                 if (
                     matched_id in self.active_sessions
                     and self.person_status.get(matched_id) == "active"
                 ):
                     # Person has valid active session - AUTHORIZED
                     is_authorized = True
+                    print(f"   ✅ Session active: {self.active_sessions[matched_id]}")
                 else:
                     # Person was registered before but has no active session
                     # This means they exited and are now bypassing entry - THREAT!
+                    print(f"   🚨 NO ACTIVE SESSION - treating as THREAT")
                     matched_id = None  # Treat as unmatched/unauthorized
+            else:
+                # No match found - unknown person
+                threshold_used = details.get(
+                    "threshold_used", self.reid_system.similarity_threshold
+                )
+                print(
+                    f"🔍 NO MATCH: Similarity {similarity:.3f} < threshold {threshold_used:.3f}"
+                )
+                print(f"   Reason: {details.get('reason', 'unknown')}")
+                print(
+                    f"   Matching mode attempted: {details.get('matching_mode', 'N/A')}"
+                )
 
             if is_authorized and matched_id:
                 # Authorized person with active session
@@ -473,6 +520,31 @@ class YOLOThreeCameraSystem:
                 # Unauthorized person (either never registered OR exited and bypassing entry)
                 color = (0, 0, 255)
 
+                # 🚨 CRITICAL: This should be a DIFFERENT PERSON!
+                print(f"\n{'!' * 60}")
+                print(f"🚨 UNAUTHORIZED PERSON DETECTED!")
+                print(f"   This person does NOT match any registered profile")
+                print(f"   Best similarity: {similarity:.3f}")
+                print(
+                    f"   This should be RED box - if showing GREEN, SYSTEM IS BROKEN!"
+                )
+                print(f"{'!' * 60}\n")
+
+                # Check if this was close to matching someone (possible impostor)
+                threshold_used = details.get(
+                    "threshold_used", self.reid_system.similarity_threshold
+                )
+                if similarity > 0.45:  # Close but not close enough (RAISED from 0.35)
+                    print(
+                        f"⚠️ SUSPICIOUS: Person similar to registered profiles but below threshold"
+                    )
+                    print(
+                        f"   Best similarity: {similarity:.3f} (threshold: {threshold_used:.3f})"
+                    )
+                    print(
+                        f"   🚨 POSSIBLE IMPOSTOR - similar appearance but not same person"
+                    )
+
                 # Check if this is a known person who exited
                 if matched_id and self.person_status.get(matched_id) == "exited":
                     label = f"THREAT: {matched_id} (BYPASSED ENTRY)"
@@ -489,6 +561,11 @@ class YOLOThreeCameraSystem:
                     )
                 else:
                     label = "UNAUTHORIZED"
+                    print(
+                        f"🚨 UNAUTHORIZED person in room (never registered or failed match)"
+                    )
+                    print(f"   Detection: Face conf={conf:.2f} | Body detected")
+                    print(f"   Location: ({center_x}, {center_y})")
 
                 self.stats["unauthorized_detections"] += 1
 

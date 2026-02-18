@@ -22,7 +22,9 @@ class MultiModalReID:
         self,
         face_weight: float = 0.6,
         body_weight: float = 0.4,
-        similarity_threshold: float = 0.50,
+        similarity_threshold: float = 0.65,  # Face+body threshold (STRICT)
+        confidence_gap: float = 0.12,  # Gap between 1st and 2nd match (BALANCED)
+        body_only_threshold: float = 0.60,  # Body-only threshold (RAISED - prevent false positives)
     ):
         """
         Initialize multi-modal re-identification system.
@@ -30,11 +32,15 @@ class MultiModalReID:
         Args:
             face_weight: Weight for face similarity (0-1)
             body_weight: Weight for body similarity (0-1)
-            similarity_threshold: Minimum similarity for matching
+            similarity_threshold: Minimum similarity for matching (with face+body)
+            confidence_gap: Minimum gap between best and 2nd best match
+            body_only_threshold: Threshold for body-only matching (room camera)
         """
         self.face_weight = face_weight
         self.body_weight = body_weight
         self.similarity_threshold = similarity_threshold
+        self.confidence_gap = confidence_gap  # NEW
+        self.body_only_threshold = body_only_threshold  # NEW: For body-primary matching
 
         # Normalize weights
         total = face_weight + body_weight
@@ -44,7 +50,13 @@ class MultiModalReID:
         print(f"✅ Multi-modal Re-ID initialized:")
         print(f"   Face weight: {self.face_weight:.2f}")
         print(f"   Body weight: {self.body_weight:.2f}")
-        print(f"   Similarity threshold: {similarity_threshold:.2f}")
+        print(
+            f"   Similarity threshold (face+body): {similarity_threshold:.2f} (STRICT)"
+        )
+        print(
+            f"   Body-only threshold: {body_only_threshold:.2f} (STRICT - anti-false-positive)"
+        )
+        print(f"   Confidence gap: {confidence_gap:.2f} (VERY STRICT)")
 
     def create_person_profile(
         self,
@@ -316,6 +328,10 @@ class MultiModalReID:
         """
         Check if query profile matches any registered profile.
 
+        BODY-PRIMARY MATCHING: Face is optional bonus, not requirement.
+        - Entry camera: Registers with face + body (high quality)
+        - Room camera: Matches with body (primary), face adds confidence
+
         Args:
             query_profile: Query person profile
             registered_profiles: Dictionary of registered profiles
@@ -324,20 +340,125 @@ class MultiModalReID:
         Returns:
             Tuple of (matched_person_id or None, best_similarity, detailed_scores)
         """
+        # Get top 2 matches to check confidence gap
         matches = self.match_person(
-            query_profile, registered_profiles, mode=mode, top_k=1
+            query_profile, registered_profiles, mode=mode, top_k=2
         )
 
         if not matches:
-            return None, 0.0, {}
+            return None, 0.0, {"reason": "no_profiles"}
 
         best_match_id, best_similarity, details = matches[0]
 
-        # Check against threshold
-        if best_similarity >= self.similarity_threshold:
-            return best_match_id, best_similarity, details
+        # Determine if this is body-only or face+body matching
+        has_query_face = (
+            query_profile.get("has_face", False)
+            and query_profile.get("face_features") is not None
+        )
+        has_query_body = (
+            query_profile.get("has_body", False)
+            and query_profile.get("body_features") is not None
+        )
+
+        face_sim = details.get("face_similarity", 0.0)
+        body_sim = details.get("body_similarity", 0.0)
+
+        # Determine which threshold to use
+        if has_query_body and not has_query_face:
+            # Body-only matching (room camera, person far away)
+            threshold = self.body_only_threshold  # 0.60 - STRICT
+            details["matching_mode"] = "body_only"
+            print(
+                f"🔍 Mode: body_only | Body similarity: {body_sim:.3f} | Threshold: {threshold:.3f}"
+            )
+        elif has_query_face and has_query_body:
+            # Face+body available - use body as primary, face as bonus
+            # If body matches well, accept even if face is weak (person far away)
+            if body_sim >= self.body_only_threshold:
+                threshold = self.body_only_threshold  # Accept based on body (0.60)
+                details["matching_mode"] = "body_primary_with_face_bonus"
+                print(
+                    f"🔍 Mode: body_primary | Body: {body_sim:.3f} | Face: {face_sim:.3f} | Threshold: {threshold:.3f}"
+                )
+            else:
+                threshold = self.similarity_threshold  # Require higher combined (0.65)
+                details["matching_mode"] = "face_and_body_required"
+                print(
+                    f"🔍 Mode: face+body required | Body: {body_sim:.3f} | Face: {face_sim:.3f} | Threshold: {threshold:.3f}"
+                )
         else:
+            # Face-only or neither (shouldn't happen)
+            threshold = self.similarity_threshold
+            details["matching_mode"] = "fallback"
+
+        # 🔒 SECURITY CHECK 1: Must exceed appropriate threshold
+        if best_similarity < threshold:
+            details["reason"] = "below_threshold"
+            details["required"] = threshold
+            details["threshold_used"] = threshold
             return None, best_similarity, details
+
+        # 🔒 SECURITY CHECK 2: Confidence gap (prevent ambiguous matches)
+        # If there's a second match that's too close to the first, reject both
+        if len(matches) > 1:
+            second_match_id, second_similarity, _ = matches[1]
+            gap = best_similarity - second_similarity
+
+            if gap < self.confidence_gap:
+                # Too close! Could be either person - treat as UNKNOWN
+                details["reason"] = "ambiguous_match"
+                details["best_match"] = best_match_id
+                details["second_match"] = second_match_id
+                details["gap"] = gap
+                details["required_gap"] = self.confidence_gap
+                print(
+                    f"⚠️ AMBIGUOUS: Best={best_match_id}({best_similarity:.2f}) vs 2nd={second_match_id}({second_similarity:.2f}), gap={gap:.2f} < {self.confidence_gap:.2f}"
+                )
+                return None, best_similarity, details
+
+        # 🔒 SECURITY CHECK 3: Body validation (REQUIRED - STRICT)
+        # Body must always match well (it's the primary identifier in room)
+        if (
+            body_sim > 0 and body_sim < 0.55
+        ):  # Body exists but doesn't match (RAISED from 0.40)
+            details["reason"] = "body_mismatch"
+            print(
+                f"⚠️ BODY MISMATCH: {best_match_id} has low body similarity {body_sim:.2f} (required: >0.55)"
+            )
+            return None, best_similarity, details
+
+        # Face validation (OPTIONAL - only reject if face is CLEARLY wrong)
+        # Don't reject for low face similarity if body matches (person far away, angle, etc.)
+        if face_sim > 0 and face_sim < 0.30:  # Face visible but VERY wrong
+            # Only reject if face contradicts body match
+            if (
+                body_sim < 0.75
+            ):  # Body match not strong enough to override (RAISED from 0.60)
+                details["reason"] = "face_contradicts_body"
+                print(
+                    f"⚠️ FACE CONTRADICTION: {best_match_id} - Face {face_sim:.2f} contradicts body {body_sim:.2f} (need >0.75 to override)"
+                )
+                return None, best_similarity, details
+            else:
+                # Body match is VERY strong, ignore weak face (likely distance/angle issue)
+                print(
+                    f"ℹ️ Low face similarity {face_sim:.2f} ignored - VERY strong body match {body_sim:.2f}"
+                )
+                details["face_ignored"] = True
+
+        # All checks passed - this is a confident match
+        details["reason"] = "confident_match"
+        details["confidence_level"] = "high" if best_similarity > 0.70 else "medium"
+        details["threshold_used"] = threshold
+
+        # Log successful match with mode
+        print(f"✅ MATCH CONFIRMED: {best_match_id} | Mode: {details['matching_mode']}")
+        print(
+            f"   Body: {body_sim:.3f} | Face: {face_sim:.3f} | Combined: {best_similarity:.3f}"
+        )
+        print(f"   Threshold used: {threshold:.3f}")
+
+        return best_match_id, best_similarity, details
 
     def update_profile_features(
         self,
