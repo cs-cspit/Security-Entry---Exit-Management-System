@@ -212,8 +212,8 @@ def test_enhanced_reid():
     )
     print()
 
-    # Open webcam
-    cap = cv2.VideoCapture(0)
+    # Open webcam (MacBook built-in camera)
+    cap = cv2.VideoCapture(1)
     if not cap.isOpened():
         print("❌ Could not open camera")
         return
