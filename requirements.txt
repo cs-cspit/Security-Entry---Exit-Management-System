@@ -13,17 +13,32 @@ ultralytics>=8.0.0
 # Face Alignment
 mtcnn>=0.1.1
 
-# Face Recognition & Encoding
-deepface>=0.0.79
-tensorflow>=2.13.0
+# Person Re-Identification (OSNet)
+torch>=2.0.0
+torchvision>=0.15.0
+torchreid>=1.4.0
+gdown>=4.7.1
+tensorboard>=2.10.0
 
-# Efficient Similarity Search
-faiss-cpu>=1.7.4
+# Deep SORT Tracking
+deep-sort-realtime>=1.3.2
+
+# Advanced Feature Extraction
+scikit-learn>=1.3.0
+scikit-image>=0.21.0
+
+# Color Analysis
+webcolors>=1.13
+colormath>=3.0.0
+
+# Efficient Similarity Search (optional for large-scale deployment)
+# faiss-cpu>=1.7.4
 # For GPU acceleration, use: faiss-gpu>=1.7.4
 
-# Additional utilities
-tf-keras>=2.15.0
-
-# Optional: For better performance on Apple Silicon
+# Face Recognition & Encoding (optional - not needed for enhanced re-ID)
+# deepface>=0.0.79
+# tensorflow>=2.13.0
+# tf-keras>=2.15.0
+# For Apple Silicon:
 # tensorflow-macos>=2.13.0
 # tensorflow-metal>=1.0.0
