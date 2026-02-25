@@ -1,7 +1,7 @@
 # Intelligence-Led Entry & Exit Management System
 
 **Project Group ID:** CSPIT/CSE/B1-C1
-**Students:** 23CS043 (Ananya Gupta), 23CS023 (Debdoot Manna)
+**Students:** 23CS023 (Ananya Gupta), 23CS043 (Debdoot Manna)
 **Domain:** Computer Vision · AI · Security Systems
 
 ---
