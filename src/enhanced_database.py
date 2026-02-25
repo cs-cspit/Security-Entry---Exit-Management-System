@@ -17,6 +17,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 
 class PersonState(Enum):
     """Person state in the system."""
@@ -231,13 +233,16 @@ class EnhancedDatabase:
 
         self.people[person_id] = person_record
 
-        # Store features
+        # Store features (includes face embedding for later BLOB serialization)
         self.global_features[person_id] = {
             "histogram": histogram,
             "body_features": body_features,
             "face_embedding": face_embedding,
             "first_seen": now,
         }
+
+        # Persist initial record to SQLite right away
+        self._persist_person_to_db(person_record)
 
         return person_record
 
@@ -263,6 +268,7 @@ class EnhancedDatabase:
     def record_entry(self, person_id: str) -> bool:
         """
         Record a person entering through the entry gate.
+        Immediately persists the entry record to SQLite.
 
         Args:
             person_id: Person identifier
@@ -284,10 +290,15 @@ class EnhancedDatabase:
             person["encounters"] = 1
             self.inside_now[person_id] = person
             self.stats["total_entries"] += 1
+
+            # Persist entry to SQLite immediately (don't wait for exit)
+            self._persist_person_to_db(person)
+
             return True
         else:
             # Already inside, increment encounters
             person["encounters"] += 1
+            self._persist_person_to_db(person)
             return False
 
     def record_exit(self, person_id: str) -> bool:
@@ -606,17 +617,31 @@ class EnhancedDatabase:
     # ========================================================================
 
     def _persist_person_to_db(self, person: Dict):
-        """Save person record to SQLite database."""
+        """Save person record to SQLite database, including face embedding BLOB."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
+        # Serialize face embedding as BLOB if available
+        face_embedding_blob = None
+        person_id = person["person_id"]
+        if person_id in self.global_features:
+            face_emb = self.global_features[person_id].get("face_embedding")
+            if face_emb is not None:
+                try:
+                    face_embedding_blob = np.array(face_emb, dtype=np.float32).tobytes()
+                except Exception:
+                    face_embedding_blob = None
+
+        now = datetime.now()
         cursor.execute(
             """
             INSERT OR REPLACE INTO people (
                 person_id, temp_uuid, permanent_uuid, state,
                 entry_time, exit_time, duration_seconds,
-                avg_velocity, max_velocity, threat_score, alert_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                avg_velocity, max_velocity, threat_score, alert_count,
+                created_at, last_seen,
+                face_embedding
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 person["person_id"],
@@ -630,6 +655,9 @@ class EnhancedDatabase:
                 person.get("max_velocity", 0.0),
                 person.get("threat_score", 0.0),
                 person.get("alert_count", 0),
+                person.get("created_at", now),
+                person.get("last_seen", now),
+                face_embedding_blob,
             ),
         )
 

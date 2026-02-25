@@ -76,7 +76,7 @@ class YOLO26CompleteSystem:
 
         print(f"📹 Camera Assignment:")
         print(f"   Entry: Camera {entry_idx}")
-        print(f"   Room:  Camera {room_idx} ← MacBook built-in webcam")
+        print(f"   Room:  Camera {room_idx}")
         print(f"   Exit:  Camera {exit_idx}")
         print()
 
@@ -222,28 +222,52 @@ class YOLO26CompleteSystem:
         print("=" * 70 + "\n")
 
     def _init_cameras(self):
-        """Initialize camera connections."""
+        """Initialize camera connections with normalized resolution."""
         print("📹 Opening cameras...")
+
+        # Target resolution — keeps all three cameras consistent for detection
+        # and ensures overlay coordinates are correct.
+        # iBall native: 1280x720 → normalized to 640x480
+        # MacBook FaceTime HD: 1280x720 → normalized to 640x480
+        # Redmi via Iriun: variable → normalized to 640x480
+        self.FRAME_WIDTH = 640
+        self.FRAME_HEIGHT = 480
+
+        camera_info = [
+            ("Entry Camera", self.entry_idx),
+            ("Room  Camera", self.room_idx),
+            ("Exit  Camera", self.exit_idx),
+        ]
+
         self.cap_entry = cv2.VideoCapture(self.entry_idx)
         self.cap_room = cv2.VideoCapture(self.room_idx)
         self.cap_exit = cv2.VideoCapture(self.exit_idx)
 
-        # Don't force resolution - let cameras use their native settings
-        # (Important for old Windows 7 webcam that has inconsistent FPS/resolution)
+        caps = [self.cap_entry, self.cap_room, self.cap_exit]
 
-        if not all(
-            [
-                self.cap_entry.isOpened(),
-                self.cap_room.isOpened(),
-                self.cap_exit.isOpened(),
-            ]
-        ):
-            print("⚠️ Warning: Not all cameras opened successfully")
-            print("   Entry:", "✅" if self.cap_entry.isOpened() else "❌")
-            print("   Room:", "✅" if self.cap_room.isOpened() else "❌")
-            print("   Exit:", "✅" if self.cap_exit.isOpened() else "❌")
-        else:
+        all_ok = True
+        for (label, _), cap in zip(camera_info, caps):
+            if not cap.isOpened():
+                print(f"   ❌ {label} — FAILED TO OPEN")
+                all_ok = False
+                continue
+
+            # Request target resolution (camera will use nearest supported mode)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.FRAME_WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.FRAME_HEIGHT)
+
+            actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            print(f"   ✅ {label}")
+            print(
+                f"      Requested: {self.FRAME_WIDTH}x{self.FRAME_HEIGHT} | "
+                f"Actual: {actual_w}x{actual_h}"
+            )
+
+        if all_ok:
             print("✅ All cameras opened successfully\n")
+        else:
+            print("⚠️  One or more cameras failed — check connections\n")
 
     def signal_handler(self, sig, frame):
         """Handle Ctrl+C gracefully."""
@@ -772,13 +796,24 @@ class YOLO26CompleteSystem:
                     self.person_status[person_id] = "active"
                     self.stats["inside"] += 1
 
-                    # Store in database
+                    # Pull extracted features from in-memory registry
+                    registered_profile = self.registered_people[person_id]
+                    face_embedding = registered_profile.get("face_embedding")
+                    body_features = registered_profile.get("body_features")
+
+                    # Add person to database FIRST (with face embedding),
+                    # then record entry so the DB row already exists.
+                    self.database.add_person(
+                        person_id,
+                        body_features=body_features,
+                        face_embedding=face_embedding,
+                    )
                     self.database.record_entry(person_id)
 
                     print(f"✅ Registered {person_id} at entry gate")
 
                     # Show extracted features
-                    features = self.registered_people[person_id]["body_features"]
+                    features = body_features or {}
 
                     hair = features.get("hair_color", {})
                     if hair.get("dominant_color"):
@@ -833,11 +868,12 @@ class YOLO26CompleteSystem:
                         1,
                     )
 
-        # Status overlay
-        cv2.rectangle(display, (0, 0), (640, 80), (0, 0, 0), -1)
+        # Status overlay — use actual frame width so it covers every camera resolution
+        h_disp, w_disp = display.shape[:2]
+        cv2.rectangle(display, (0, 0), (w_disp, 80), (0, 0, 0), -1)
         cv2.putText(
             display,
-            "ENTRY GATE",
+            "ENTRY CAMERA",
             (10, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
@@ -855,11 +891,11 @@ class YOLO26CompleteSystem:
         )
         cv2.putText(
             display,
-            f"Detections: {len(detections)}",
+            f"Detections: {len(detections)} | Face-ID: {'ON' if self.use_face_recognition else 'OFF'}",
             (10, 70),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.4,
-            (200, 200, 200),
+            (0, 255, 255) if self.use_face_recognition else (200, 200, 200),
             1,
         )
 
@@ -993,48 +1029,53 @@ class YOLO26CompleteSystem:
                 elif not person_id and similarity > 0.50:
                     print(f"   Hint: Score {similarity:.3f} is close. Lower threshold?")
 
+            # ── Trajectory + velocity tracking for ALL detections ────────────
+            # Track every person regardless of auth status so that crowd
+            # behaviour, congestion and walking/running speeds are always
+            # visible — essential for CISF threat analysis.
+            track_key = (
+                person_id if person_id else f"unauth_{center_x // 60}_{center_y // 60}"
+            )
+            self.trajectories[track_key].append((center_x, center_y, current_time))
+            if len(self.trajectories[track_key]) > 60:
+                self.trajectories[track_key].pop(0)
+
+            velocity = self._calculate_velocity(track_key)
+            self.velocity_data[track_key].append(velocity)
+
+            # Always draw the trajectory tail
+            self._draw_trajectory(display, track_key)
+
+            # Velocity indicator (shown for every detection)
+            velocity_text = f"{velocity:.2f} m/s"
+            if velocity > 2.0:
+                v_color = (0, 0, 255)  # RED - running
+                velocity_text += " RUNNING!"
+            elif velocity > 1.0:
+                v_color = (0, 165, 255)  # ORANGE - fast walk
+            else:
+                v_color = (0, 255, 0)  # GREEN - normal
+
+            cv2.putText(
+                display,
+                velocity_text,
+                (bx, by + bh + 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                v_color,
+                1,
+            )
+
             # Check if person has active session
             if person_id and person_id in self.active_sessions:
                 # AUTHORIZED person with active session
                 authorized_count += 1
-                color = (0, 255, 0)  # GREEN
+                box_color = (0, 255, 0)  # GREEN
                 label = f"{person_id} ({similarity:.2f})"
 
-                # Update trajectory
-                self.trajectories[person_id].append((center_x, center_y, current_time))
-                if len(self.trajectories[person_id]) > 50:
-                    self.trajectories[person_id].pop(0)
-
-                # Calculate velocity
-                velocity = self._calculate_velocity(person_id)
-                self.velocity_data[person_id].append(velocity)
-
-                # Store in database
+                # Store trajectory point in DB (only for registered persons)
                 self.database.add_trajectory_point(
                     person_id, center_x, center_y, "room_camera", velocity=velocity
-                )
-
-                # Draw trajectory
-                self._draw_trajectory(display, person_id)
-
-                # Velocity indicator
-                velocity_text = f"{velocity:.2f} m/s"
-                if velocity > 2.0:
-                    v_color = (0, 0, 255)  # RED - running
-                    velocity_text += " RUNNING!"
-                elif velocity > 1.0:
-                    v_color = (0, 165, 255)  # ORANGE - fast walk
-                else:
-                    v_color = (0, 255, 0)  # GREEN - normal
-
-                cv2.putText(
-                    display,
-                    velocity_text,
-                    (bx, by + bh + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    v_color,
-                    1,
                 )
 
                 # Additional debug if enabled
@@ -1045,7 +1086,7 @@ class YOLO26CompleteSystem:
                 # UNAUTHORIZED detection
                 unauthorized_count += 1
                 self.stats["unauthorized"] += 1
-                color = (0, 0, 255)  # RED
+                box_color = (0, 0, 255)  # RED
                 label = f"UNAUTHORIZED ({similarity:.2f})"
 
                 # Alert
@@ -1096,21 +1137,28 @@ class YOLO26CompleteSystem:
                 # Draw keypoints on top
                 for i, (x, y, conf) in enumerate(keypoints):
                     if conf > 0.3:
-                        color = (0, 255, 0) if conf > 0.7 else (0, 200, 200)
-                        cv2.circle(display, (int(x), int(y)), 5, color, -1)
+                        kpt_color = (0, 255, 0) if conf > 0.7 else (0, 200, 200)
+                        cv2.circle(display, (int(x), int(y)), 5, kpt_color, -1)
                         cv2.circle(display, (int(x), int(y)), 6, (255, 255, 255), 1)
 
-            # Draw bbox and label
-            cv2.rectangle(display, (bx, by), (bx + bw, by + bh), color, 2)
+            # Draw bbox and label (use box_color preserved from status check above)
+            cv2.rectangle(display, (bx, by), (bx + bw, by + bh), box_color, 2)
             cv2.putText(
-                display, label, (bx, by - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2
+                display,
+                label,
+                (bx, by - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                box_color,
+                2,
             )
 
-        # Status overlay
-        cv2.rectangle(display, (0, 0), (640, 110), (0, 0, 0), -1)
+        # Status overlay — use actual frame width
+        h_disp, w_disp = display.shape[:2]
+        cv2.rectangle(display, (0, 0), (w_disp, 110), (0, 0, 0), -1)
         cv2.putText(
             display,
-            "ROOM MONITORING",
+            "ROOM CAMERA",
             (10, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
@@ -1269,7 +1317,7 @@ class YOLO26CompleteSystem:
 
             if person_id and person_id in self.active_sessions:
                 # Valid exit
-                color = (0, 255, 0)  # GREEN
+                box_color = (0, 255, 0)  # GREEN
                 label = f"{person_id} EXITING"
 
                 # Close session
@@ -1285,11 +1333,15 @@ class YOLO26CompleteSystem:
                 # Record exit in database
                 self.database.record_exit(person_id)
 
-                # Update person record with velocity data
+                # Update person record with velocity data and re-persist so
+                # avg_velocity / max_velocity are not 0 in the database.
+                # (record_exit persists before velocity is known, so we must
+                # write it a second time after computing the values.)
                 if person_id in self.database.people:
                     person = self.database.people[person_id]
                     person["avg_velocity"] = avg_velocity
                     person["max_velocity"] = max_velocity
+                    self.database._persist_person_to_db(person)
 
                 # Remove from active
                 del self.active_sessions[person_id]
@@ -1304,11 +1356,11 @@ class YOLO26CompleteSystem:
 
             elif person_id:
                 # Person registered but no active session
-                color = (0, 165, 255)  # ORANGE
+                box_color = (0, 165, 255)  # ORANGE
                 label = f"{person_id} NO SESSION"
             else:
                 # Unknown person at exit
-                color = (0, 0, 255)  # RED
+                box_color = (0, 0, 255)  # RED
                 label = "UNKNOWN"
 
             # Draw pose keypoints and skeleton if available
@@ -1351,21 +1403,28 @@ class YOLO26CompleteSystem:
                 # Draw keypoints on top
                 for i, (x, y, conf) in enumerate(keypoints):
                     if conf > 0.3:
-                        color = (0, 255, 0) if conf > 0.7 else (0, 200, 200)
-                        cv2.circle(display, (int(x), int(y)), 5, color, -1)
+                        kpt_color = (0, 255, 0) if conf > 0.7 else (0, 200, 200)
+                        cv2.circle(display, (int(x), int(y)), 5, kpt_color, -1)
                         cv2.circle(display, (int(x), int(y)), 6, (255, 255, 255), 1)
 
-            # Draw
-            cv2.rectangle(display, (bx, by), (bx + bw, by + bh), color, 2)
+            # Draw (use box_color preserved from status check above)
+            cv2.rectangle(display, (bx, by), (bx + bw, by + bh), box_color, 2)
             cv2.putText(
-                display, label, (bx, by - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2
+                display,
+                label,
+                (bx, by - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                box_color,
+                2,
             )
 
-        # Status overlay
-        cv2.rectangle(display, (0, 0), (640, 80), (0, 0, 0), -1)
+        # Status overlay — use actual frame width
+        h_disp, w_disp = display.shape[:2]
+        cv2.rectangle(display, (0, 0), (w_disp, 90), (0, 0, 0), -1)
         cv2.putText(
             display,
-            "EXIT GATE",
+            "EXIT CAMERA",
             (10, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
@@ -1383,11 +1442,20 @@ class YOLO26CompleteSystem:
         )
         cv2.putText(
             display,
-            f"Detections: {len(detections)} | Threshold: {self.exit_threshold:.2f}",
+            f"Detections: {len(detections)} | Threshold: {self.exit_threshold:.2f} | Face-ID: {'ON' if self.use_face_recognition else 'OFF'}",
             (10, 70),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.4,
-            (200, 200, 200),
+            (0, 255, 255) if self.use_face_recognition else (200, 200, 200),
+            1,
+        )
+        cv2.putText(
+            display,
+            f"Face matching: {'face-first (60%) + OSNet (40%)' if self.use_face_recognition else 'body-only OSNet (70%) + appearance (30%)'}",
+            (10, 86),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.33,
+            (180, 180, 180),
             1,
         )
 
@@ -1427,6 +1495,32 @@ class YOLO26CompleteSystem:
                 if not (ret_entry and ret_room and ret_exit):
                     print("⚠️ Failed to read from cameras")
                     break
+
+                # Normalize all frames to the target resolution before processing.
+                # This ensures consistent coordinates for detection, feature
+                # extraction, and overlay rendering across all three cameras.
+                target = (self.FRAME_WIDTH, self.FRAME_HEIGHT)
+                if (
+                    frame_entry.shape[1] != self.FRAME_WIDTH
+                    or frame_entry.shape[0] != self.FRAME_HEIGHT
+                ):
+                    frame_entry = cv2.resize(
+                        frame_entry, target, interpolation=cv2.INTER_LINEAR
+                    )
+                if (
+                    frame_room.shape[1] != self.FRAME_WIDTH
+                    or frame_room.shape[0] != self.FRAME_HEIGHT
+                ):
+                    frame_room = cv2.resize(
+                        frame_room, target, interpolation=cv2.INTER_LINEAR
+                    )
+                if (
+                    frame_exit.shape[1] != self.FRAME_WIDTH
+                    or frame_exit.shape[0] != self.FRAME_HEIGHT
+                ):
+                    frame_exit = cv2.resize(
+                        frame_exit, target, interpolation=cv2.INTER_LINEAR
+                    )
 
                 # Process each camera
                 display_entry = self.process_entry_camera(frame_entry)
@@ -1519,6 +1613,10 @@ class YOLO26CompleteSystem:
         print("📊 Exporting session data...")
         self.show_statistics()
 
+        # Persist final trajectories and write last_session.json
+        print("💾 Closing database (saving trajectories + session export)...")
+        self.database.close()
+
         print("📹 Releasing cameras...")
         self.cap_entry.release()
         self.cap_room.release()
@@ -1528,57 +1626,107 @@ class YOLO26CompleteSystem:
         print("✅ Cleanup complete\n")
 
 
-def main():
-    """Entry point."""
-    print("\n" + "=" * 70)
-    print("  YOLO26 COMPLETE SECURITY SYSTEM")
-    print("=" * 70)
-
-    # Detect available cameras
-    print("\n📹 Detecting cameras...")
+def _detect_available_cameras(max_index: int = 6) -> list:
+    """Probe camera indices 0..max_index-1 and return those that produce frames."""
     available = []
-    for i in range(5):
+    for i in range(max_index):
         cap = cv2.VideoCapture(i)
         if cap.isOpened():
             ret, _ = cap.read()
             if ret:
                 available.append(i)
-            cap.release()
+        cap.release()
+    return available
 
-    print(f"✅ Found {len(available)} camera(s): {available}")
 
-    if len(available) < 3:
-        print("\n⚠️ Warning: Less than 3 cameras detected")
-        print("   System requires 3 cameras for full operation")
-        print("   Using available cameras (some views may duplicate)\n")
+def main():
+    """
+    Entry point with argparse-based camera assignment.
 
-        if len(available) == 0:
-            print("❌ No cameras found!")
-            return
+    Camera setup for this project:
+      --entry   iBall Face2Face CHD20.0 Webcam (720p, USB)
+      --room    MacBook FaceTime HD (built-in, usually index 0 on macOS)
+      --exit    Redmi Note 11 via Iriun Webcam app (USB/WiFi)
 
-        # Use what we have
-        entry_idx = available[0]
-        room_idx = available[1] if len(available) > 1 else available[0]
-        exit_idx = available[2] if len(available) > 2 else available[0]
-    else:
-        # CORRECT ASSIGNMENT for MacBook setup:
-        # Camera 0 = Entry gate (external camera)
-        # Camera 1 = Exit gate (external camera)
-        # Camera 2 = Room monitoring (MacBook built-in webcam)
-        entry_idx = available[0]
-        room_idx = available[2]  # MacBook built-in webcam
-        exit_idx = available[1]
+    Run the helper script first if you are unsure which index maps to which camera:
+        python scripts/detect_cameras.py
+
+    Default indices (0=MacBook built-in, 1=iBall, 2=Iriun) are chosen for a
+    typical macOS setup where the built-in webcam claims index 0 and USB cameras
+    are assigned sequentially.  Override with --entry / --room / --exit if needed.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="YOLO26 Three-Camera Security System",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Camera setup:
+  --entry  Entry gate camera  (default index: 0)
+  --room   Room monitor camera (default index: 2)
+  --exit   Exit gate camera   (default index: 1)
+
+Run  python scripts/detect_cameras.py  to identify camera indices.
+        """,
+    )
+    parser.add_argument(
+        "--entry",
+        type=int,
+        default=0,
+        metavar="IDX",
+        help="Camera index for Entry gate (default: 0)",
+    )
+    parser.add_argument(
+        "--room",
+        type=int,
+        default=2,
+        metavar="IDX",
+        help="Camera index for Room monitor (default: 2)",
+    )
+    parser.add_argument(
+        "--exit",
+        type=int,
+        default=1,
+        metavar="IDX",
+        help="Camera index for Exit gate (default: 1)",
+    )
+    parser.add_argument(
+        "--list-cameras",
+        action="store_true",
+        help="Probe and list all available camera indices, then exit",
+    )
+    args = parser.parse_args()
+
+    print("\n" + "=" * 70)
+    print("  YOLO26 COMPLETE SECURITY SYSTEM")
+    print("=" * 70)
+
+    if args.list_cameras:
+        print("\n🔍 Probing camera indices 0-5 …")
+        available = _detect_available_cameras()
+        if available:
+            print(f"✅ Found camera(s) at index(es): {available}")
+        else:
+            print("❌ No cameras detected.")
+        return
+
+    entry_idx = args.entry
+    room_idx = args.room
+    exit_idx = args.exit
 
     print(f"\n📹 Camera Assignment:")
-    print(f"  Entry: Camera {entry_idx}")
-    print(f"  Room:  Camera {room_idx} ← MacBook webcam")
-    print(f"  Exit:  Camera {exit_idx}\n")
+    print(f"   Entry Camera : index {entry_idx}")
+    print(f"   Room  Camera : index {room_idx}")
+    print(f"   Exit  Camera : index {exit_idx}")
+    print()
+    print("💡 Tip: run with --list-cameras to identify indices,")
+    print("         or override with --entry N --room N --exit N")
+    print()
 
     # Create and run system
     system = YOLO26CompleteSystem(
         entry_idx=entry_idx, room_idx=room_idx, exit_idx=exit_idx
     )
-
     system.run()
 
 
