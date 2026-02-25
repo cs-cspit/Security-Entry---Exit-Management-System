@@ -43,6 +43,7 @@ try:
     from detectors.yolo26_body_detector import YOLO26BodyDetector
     from enhanced_database import EnhancedDatabase
     from features.body_only_analyzer import BodyOnlyAnalyzer
+    from features.face_recognition import FaceRecognitionExtractor
     from features.osnet_extractor import OSNetExtractor
 except ImportError as e:
     print(f"❌ Import Error: {e}")
@@ -63,7 +64,7 @@ class YOLO26CompleteSystem:
         print("\n" + "=" * 70)
         print("  YOLO26 COMPLETE THREE-CAMERA SECURITY SYSTEM")
         print("=" * 70)
-        print("✅ Unified YOLO26-pose detection")
+        print("✅ Unified YOLO26-pose detection (17 keypoints)")
         print("✅ Body + Hair + Skin + Clothing + OSNet re-identification")
         print("✅ Velocity tracking with real-time display")
         print("✅ Complete entry → room → exit pipeline\n")
@@ -97,6 +98,26 @@ class YOLO26CompleteSystem:
         print("🔧 Loading feature extractors...")
         self.osnet = OSNetExtractor(device="auto")
         self.body_analyzer = BodyOnlyAnalyzer()
+
+        # Initialize face recognition (Phase 5)
+        print("🔧 Loading face recognition (InsightFace)...")
+        try:
+            self.face_recognizer = FaceRecognitionExtractor(
+                model_name="buffalo_sc",  # Smaller, faster model
+                det_size=(640, 640),
+            )
+            self.use_face_recognition = self.face_recognizer.is_initialized()
+            if self.use_face_recognition:
+                print("✅ Face recognition enabled!")
+                print("   - Entry gate: Face + Body matching")
+                print("   - Exit gate: Face-first matching (fallback to body)")
+            else:
+                print("⚠️  Face recognition disabled (initialization failed)")
+        except Exception as e:
+            print(f"⚠️  Face recognition not available: {e}")
+            print("   System will use body-only matching")
+            self.face_recognizer = None
+            self.use_face_recognition = False
 
         # Initialize cross-camera adapter
         print("🔧 Loading cross-camera adapter...")
@@ -149,6 +170,12 @@ class YOLO26CompleteSystem:
         # This prevents matches based purely on appearance when body features don't match
         self.min_osnet_threshold = 0.50  # OSNet must be at least 0.50 for any match
 
+        # Face recognition weights (Phase 5)
+        self.face_weight = 0.60  # Face is most discriminative when available
+        self.face_threshold = 0.45  # InsightFace threshold (0.4-0.5 typical)
+        self.use_face_at_entry = True  # Always try to capture face at entry
+        self.use_face_at_exit = True  # Face-first matching at exit
+
         # NOTE: Thresholds are now managed by CrossCameraAdapter!
         # These are fallback values only
         self.similarity_threshold = 0.38  # Fallback for room (managed by adapter)
@@ -182,6 +209,11 @@ class YOLO26CompleteSystem:
         print("  C - Clear all registrations")
         print("  S - Show statistics")
         print("  I - Show cross-camera adapter info")
+        print(
+            "  F - Toggle face recognition (currently: {})".format(
+                "ON" if self.use_face_recognition else "OFF"
+            )
+        )
         print("  + - Increase room threshold (+0.05)")
         print("  - - Decrease room threshold (-0.05)")
         print("  ] - Increase exit threshold (+0.05)")
@@ -222,7 +254,7 @@ class YOLO26CompleteSystem:
         self, person_id: str, frame: np.ndarray, detection: dict
     ) -> bool:
         """
-        Register a new person with full feature extraction.
+        Register a new person with full feature extraction (Phase 5: includes face).
         """
         try:
             body_bbox = detection["body_bbox"]
@@ -243,10 +275,26 @@ class YOLO26CompleteSystem:
 
             body_features = self.body_analyzer.extract_features(frame, body_bbox)
 
+            # Phase 5: Extract face embedding at entry
+            face_embedding = None
+            if self.use_face_recognition and self.use_face_at_entry:
+                if self.debug_mode:
+                    print(f"   Extracting face embedding...")
+
+                face_embedding = self.face_recognizer.extract_face_embedding(
+                    frame, bbox=body_bbox, min_confidence=0.5
+                )
+
+                if face_embedding is not None:
+                    print(f"   ✅ Face detected and embedded (512D)")
+                else:
+                    print(f"   ⚠️  No face detected (will use body-only matching)")
+
             # Store profile
             self.registered_people[person_id] = {
                 "osnet": osnet_features,
                 "body_features": body_features,
+                "face_embedding": face_embedding,  # Phase 5: Store face
                 "body_bbox": body_bbox,
                 "keypoints": detection.get("keypoints"),
                 "registered_at": datetime.now(),
@@ -262,7 +310,7 @@ class YOLO26CompleteSystem:
         self, frame: np.ndarray, detection: dict, target_camera: str = "room"
     ) -> tuple:
         """
-        Match a detected person against registered people.
+        Match a detected person against registered people (Phase 5: includes face).
 
         Args:
             frame: Current frame
@@ -277,6 +325,20 @@ class YOLO26CompleteSystem:
         body_bbox = detection["body_bbox"]
 
         try:
+            # Phase 5: Extract face embedding if exit camera (face-first matching)
+            face_query = None
+            if (
+                self.use_face_recognition
+                and target_camera == "exit"
+                and self.use_face_at_exit
+            ):
+                face_query = self.face_recognizer.extract_face_embedding(
+                    frame, bbox=body_bbox, min_confidence=0.5
+                )
+
+                if self.debug_mode and face_query is not None:
+                    print(f"   🔍 Face detected at exit - using face-first matching")
+
             # Extract query features
             osnet_query = self.osnet.extract_features(frame, body_bbox)
             if osnet_query is None:
@@ -298,14 +360,48 @@ class YOLO26CompleteSystem:
         second_best_score = 0.0
         all_scores = {}
 
+        # Initialize debug_info dictionary
+        debug_info = {
+            "all_scores": {},
+            "adaptive_threshold": 0.0,
+            "adaptive_gap": 0.0,
+            "reason": "",
+            "gap": 0.0,
+            "second_best": 0.0,
+        }
+
         # Get adaptive threshold from cross-camera adapter
         adaptive_threshold, adaptive_gap = self.cross_camera.get_matching_params(
             "entry", target_camera
         )
+        debug_info["adaptive_threshold"] = adaptive_threshold
+        debug_info["adaptive_gap"] = adaptive_gap
 
         for person_id, person_data in self.registered_people.items():
             osnet_registered = person_data["osnet"]
             body_registered = person_data["body_features"]
+            face_registered = person_data.get("face_embedding")  # Phase 5
+
+            # Phase 5: Face matching (if available and at exit)
+            face_sim = 0.0
+            has_face_match = False
+            if (
+                face_query is not None
+                and face_registered is not None
+                and target_camera == "exit"
+            ):
+                # Face-first matching at exit
+                face_sim = self.face_recognizer.compare_faces(
+                    face_query, face_registered
+                )
+                has_face_match = True
+
+                if self.debug_mode:
+                    print(f"\n👤 Face Match for {person_id}: {face_sim:.3f}")
+                    if face_sim >= self.face_threshold:
+                        print(f"   ✅ Face match! (>{self.face_threshold:.2f})")
+                    else:
+                        print(f"   ❌ Face no match (<{self.face_threshold:.2f})")
 
             # OSNet similarity (PROPER cosine similarity - normalized dot product)
             dot_product = np.dot(osnet_query, osnet_registered)
@@ -342,26 +438,36 @@ class YOLO26CompleteSystem:
             )
             clothing_sim = (upper_sim + lower_sim) / 2.0
 
-            # Weighted combination
-            # HARD OSNET CHECK: Reject if OSNet similarity is too low
-            # This prevents false positives where appearance matches but person is different
-            if osnet_sim < self.min_osnet_threshold:
-                debug_info["all_scores"][person_id] = {
-                    "osnet": osnet_sim,
-                    "hair": hair_sim,
-                    "skin": skin_sim,
-                    "clothing": clothing_sim,
-                    "total": 0.0,
-                    "rejected": f"OSNet too low ({osnet_sim:.3f} < {self.min_osnet_threshold:.3f})",
-                }
-                continue  # Skip this person entirely
+            # Phase 5: Weighted combination with face (if at exit and face available)
+            if has_face_match and face_sim >= self.face_threshold:
+                # Face match found - use face-dominant scoring
+                total_score = face_sim * self.face_weight + osnet_sim * (
+                    1.0 - self.face_weight
+                )
 
-            total_score = (
-                osnet_sim * self.osnet_weight
-                + hair_sim * self.hair_weight
-                + skin_sim * self.skin_weight
-                + clothing_sim * self.clothing_weight
-            )
+                if self.debug_mode:
+                    print(f"   Using FACE-DOMINANT scoring: {total_score:.3f}")
+            else:
+                # No face or face didn't match - use body-only scoring
+                # HARD OSNET CHECK: Reject if OSNet similarity is too low
+                if osnet_sim < self.min_osnet_threshold:
+                    debug_info["all_scores"][person_id] = {
+                        "osnet": osnet_sim,
+                        "hair": hair_sim,
+                        "skin": skin_sim,
+                        "clothing": clothing_sim,
+                        "face": face_sim if has_face_match else None,
+                        "total": 0.0,
+                        "rejected": f"OSNet too low ({osnet_sim:.3f} < {self.min_osnet_threshold:.3f})",
+                    }
+                    continue  # Skip this person entirely
+
+                total_score = (
+                    osnet_sim * self.osnet_weight
+                    + hair_sim * self.hair_weight
+                    + skin_sim * self.skin_weight
+                    + clothing_sim * self.clothing_weight
+                )
 
             # Apply cross-camera adjustment
             total_score = self.cross_camera.adjust_similarity_score(
@@ -377,6 +483,7 @@ class YOLO26CompleteSystem:
                 "hair": hair_sim,
                 "skin": skin_sim,
                 "clothing": clothing_sim,
+                "face": face_sim if has_face_match else None,  # Phase 5
                 "total": total_score,
             }
 
@@ -573,12 +680,49 @@ class YOLO26CompleteSystem:
             body_bbox = detection["body_bbox"]
             bx, by, bw, bh = body_bbox
 
-            # Draw pose keypoints if available
+            # Draw pose keypoints and skeleton if available
             if detection.get("keypoints") is not None:
                 keypoints = detection["keypoints"]
+
+                # Draw skeleton connections first
+                skeleton = [
+                    (0, 1),
+                    (0, 2),
+                    (1, 3),
+                    (2, 4),  # Head
+                    (5, 6),
+                    (5, 7),
+                    (7, 9),
+                    (6, 8),
+                    (8, 10),  # Arms
+                    (5, 11),
+                    (6, 12),
+                    (11, 12),  # Torso
+                    (11, 13),
+                    (13, 15),
+                    (12, 14),
+                    (14, 16),  # Legs
+                ]
+
+                for start_idx, end_idx in skeleton:
+                    if start_idx < len(keypoints) and end_idx < len(keypoints):
+                        x1, y1, conf1 = keypoints[start_idx]
+                        x2, y2, conf2 = keypoints[end_idx]
+                        if conf1 > 0.3 and conf2 > 0.3:
+                            cv2.line(
+                                display,
+                                (int(x1), int(y1)),
+                                (int(x2), int(y2)),
+                                (0, 255, 255),
+                                2,
+                            )
+
+                # Draw keypoints on top
                 for i, (x, y, conf) in enumerate(keypoints):
-                    if conf > 0.5:
-                        cv2.circle(display, (int(x), int(y)), 3, (0, 255, 0), -1)
+                    if conf > 0.3:
+                        color = (0, 255, 0) if conf > 0.7 else (0, 200, 200)
+                        cv2.circle(display, (int(x), int(y)), 5, color, -1)
+                        cv2.circle(display, (int(x), int(y)), 6, (255, 255, 255), 1)
 
             # Draw detection
             cv2.rectangle(display, (bx, by), (bx + bw, by + bh), (0, 255, 255), 2)
@@ -912,12 +1056,49 @@ class YOLO26CompleteSystem:
                     camera_source="room_camera",
                 )
 
-            # Draw pose keypoints if available
+            # Draw pose keypoints and skeleton if available
             if detection.get("keypoints") is not None:
                 keypoints = detection["keypoints"]
+
+                # Draw skeleton connections first
+                skeleton = [
+                    (0, 1),
+                    (0, 2),
+                    (1, 3),
+                    (2, 4),  # Head
+                    (5, 6),
+                    (5, 7),
+                    (7, 9),
+                    (6, 8),
+                    (8, 10),  # Arms
+                    (5, 11),
+                    (6, 12),
+                    (11, 12),  # Torso
+                    (11, 13),
+                    (13, 15),
+                    (12, 14),
+                    (14, 16),  # Legs
+                ]
+
+                for start_idx, end_idx in skeleton:
+                    if start_idx < len(keypoints) and end_idx < len(keypoints):
+                        x1, y1, conf1 = keypoints[start_idx]
+                        x2, y2, conf2 = keypoints[end_idx]
+                        if conf1 > 0.3 and conf2 > 0.3:
+                            cv2.line(
+                                display,
+                                (int(x1), int(y1)),
+                                (int(x2), int(y2)),
+                                (0, 255, 255),
+                                2,
+                            )
+
+                # Draw keypoints on top
                 for i, (x, y, conf) in enumerate(keypoints):
-                    if conf > 0.5:
-                        cv2.circle(display, (int(x), int(y)), 3, (0, 255, 0), -1)
+                    if conf > 0.3:
+                        color = (0, 255, 0) if conf > 0.7 else (0, 200, 200)
+                        cv2.circle(display, (int(x), int(y)), 5, color, -1)
+                        cv2.circle(display, (int(x), int(y)), 6, (255, 255, 255), 1)
 
             # Draw bbox and label
             cv2.rectangle(display, (bx, by), (bx + bw, by + bh), color, 2)
@@ -1130,12 +1311,49 @@ class YOLO26CompleteSystem:
                 color = (0, 0, 255)  # RED
                 label = "UNKNOWN"
 
-            # Draw pose keypoints if available
+            # Draw pose keypoints and skeleton if available
             if detection.get("keypoints") is not None:
                 keypoints = detection["keypoints"]
+
+                # Draw skeleton connections first
+                skeleton = [
+                    (0, 1),
+                    (0, 2),
+                    (1, 3),
+                    (2, 4),  # Head
+                    (5, 6),
+                    (5, 7),
+                    (7, 9),
+                    (6, 8),
+                    (8, 10),  # Arms
+                    (5, 11),
+                    (6, 12),
+                    (11, 12),  # Torso
+                    (11, 13),
+                    (13, 15),
+                    (12, 14),
+                    (14, 16),  # Legs
+                ]
+
+                for start_idx, end_idx in skeleton:
+                    if start_idx < len(keypoints) and end_idx < len(keypoints):
+                        x1, y1, conf1 = keypoints[start_idx]
+                        x2, y2, conf2 = keypoints[end_idx]
+                        if conf1 > 0.3 and conf2 > 0.3:
+                            cv2.line(
+                                display,
+                                (int(x1), int(y1)),
+                                (int(x2), int(y2)),
+                                (0, 255, 255),
+                                2,
+                            )
+
+                # Draw keypoints on top
                 for i, (x, y, conf) in enumerate(keypoints):
-                    if conf > 0.5:
-                        cv2.circle(display, (int(x), int(y)), 3, (0, 255, 0), -1)
+                    if conf > 0.3:
+                        color = (0, 255, 0) if conf > 0.7 else (0, 200, 200)
+                        cv2.circle(display, (int(x), int(y)), 5, color, -1)
+                        cv2.circle(display, (int(x), int(y)), 6, (255, 255, 255), 1)
 
             # Draw
             cv2.rectangle(display, (bx, by), (bx + bw, by + bh), color, 2)
@@ -1274,6 +1492,17 @@ class YOLO26CompleteSystem:
                 elif key == ord("i"):
                     # Show cross-camera adapter info
                     self.cross_camera.print_diagnostics()
+                elif key == ord("f"):
+                    # Toggle face recognition
+                    if self.face_recognizer is not None:
+                        self.use_face_recognition = not self.use_face_recognition
+                        print(
+                            f"\n🔧 Face recognition: {'ON' if self.use_face_recognition else 'OFF'}\n"
+                        )
+                    else:
+                        print(
+                            "\n⚠️  Face recognition not available (InsightFace not installed)\n"
+                        )
 
         except Exception as e:
             print(f"\n❌ Error in main loop: {e}")

@@ -115,7 +115,10 @@ class EnhancedDatabase:
                 max_velocity REAL,
                 threat_score REAL,
                 alert_count INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP,
+                last_seen TIMESTAMP,
+                encounters INTEGER DEFAULT 1,
+                face_embedding BLOB
             )
         """)
 
@@ -191,6 +194,7 @@ class EnhancedDatabase:
         state: PersonState = PersonState.WAITING_TO_ENTER,
         histogram=None,
         body_features=None,
+        face_embedding=None,
     ) -> Dict:
         """
         Add a new person to the database.
@@ -200,6 +204,7 @@ class EnhancedDatabase:
             state: Initial state
             histogram: Face histogram for matching
             body_features: Body feature vector for matching
+            face_embedding: Face embedding from InsightFace (512D numpy array)
 
         Returns:
             Person record dictionary
@@ -230,6 +235,7 @@ class EnhancedDatabase:
         self.global_features[person_id] = {
             "histogram": histogram,
             "body_features": body_features,
+            "face_embedding": face_embedding,
             "first_seen": now,
         }
 
