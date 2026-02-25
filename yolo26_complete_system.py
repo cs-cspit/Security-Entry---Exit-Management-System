@@ -53,20 +53,71 @@ except ImportError as e:
     print("   pip install ultralytics opencv-python numpy torch torchvision")
     sys.exit(1)
 
+# ── Phase 6: Multi-person tracker (YOLO26 built-in ByteTrack) ────────────────
+try:
+    from tracking.multi_tracker import MultiPersonTracker, TrackedPerson
+
+    _TRACKER_AVAILABLE = True
+except ImportError:
+    _TRACKER_AVAILABLE = False
+    print("⚠️  MultiPersonTracker not found — room camera uses frame-by-frame detection")
+
+# ── Phase 7: Behavior detectors ──────────────────────────────────────────────
+try:
+    from behaviors.loitering_detector import LoiteringDetector
+    from behaviors.tailgating_detector import TailgatingDetector
+
+    _BEHAVIORS_AVAILABLE = True
+except ImportError:
+    _BEHAVIORS_AVAILABLE = False
+    print("⚠️  Behavior detectors not found — loitering/tailgating checks disabled")
+
+# ── Phase 7: WebSocket / REST API bridge (optional) ──────────────────────────
+try:
+    from api.websocket_bridge import SecurityAPIBridge
+
+    _API_BRIDGE_AVAILABLE = True
+except ImportError:
+    _API_BRIDGE_AVAILABLE = False
+    SecurityAPIBridge = None  # type: ignore
+
 
 class YOLO26CompleteSystem:
     """
     Complete three-camera security system using YOLO26-pose.
+
+    Phase 6 additions:
+      - MultiPersonTracker (YOLO26 + ByteTrack built-in) for stable room IDs
+      - Per-track OSNet embedding aggregation (temporal mean pooling)
+      - Track → Person association persisted across occlusions
+
+    Phase 7 additions:
+      - LoiteringDetector: zone-based dwell-time alerts
+      - TailgatingDetector: rapid successive entry detection
+      - Panic behavior detection (crowd avg velocity)
+      - Enhanced AlertManager: Telegram + WebSocket channels
+      - SecurityAPIBridge: FastAPI REST + WebSocket + MJPEG streams
     """
 
-    def __init__(self, entry_idx=0, room_idx=2, exit_idx=1):
+    def __init__(
+        self,
+        entry_idx=0,
+        room_idx=2,
+        exit_idx=1,
+        enable_api: bool = True,
+        api_port: int = 8000,
+    ):
         """Initialize the complete system."""
         print("\n" + "=" * 70)
         print("  YOLO26 COMPLETE THREE-CAMERA SECURITY SYSTEM")
+        print("  Phases 1-7 Active")
         print("=" * 70)
-        print("✅ Unified YOLO26-pose detection (17 keypoints)")
-        print("✅ Body + Hair + Skin + Clothing + OSNet re-identification")
+        print("✅ Unified YOLO26-pose detection (17 keypoints, NMS-free)")
+        print("✅ Body + Hair + Skin + Clothing + OSNet + Face re-identification")
+        print("✅ ByteTrack multi-person tracking (YOLO26 built-in)")
+        print("✅ Loitering / Tailgating / Panic behavior detection")
         print("✅ Velocity tracking with real-time display")
+        print("✅ REST API + WebSocket + MJPEG streams")
         print("✅ Complete entry → room → exit pipeline\n")
 
         self.running = True
@@ -93,6 +144,31 @@ class YOLO26CompleteSystem:
             model_name="yolo26n-pose.pt", confidence_threshold=0.5, device="auto"
         )
         print()
+
+        # ── Phase 6: Multi-person tracker ────────────────────────────────────
+        if _TRACKER_AVAILABLE:
+            print("🔧 Loading dedicated room-camera detector for ByteTrack...")
+            # IMPORTANT: the room tracker MUST use its own YOLO model instance.
+            # Entry/exit cameras call model.predict() on self.detector; if the
+            # tracker shared that instance, those predict() calls would reset
+            # ByteTrack's internal predictor state every frame → 0 room detections.
+            # A dedicated instance keeps track() and predict() completely isolated.
+            self._room_detector = YOLO26BodyDetector(
+                model_name="yolo26n-pose.pt",
+                confidence_threshold=0.5,
+                device="auto",
+            )
+            print("🔧 Initializing multi-person tracker (ByteTrack)...")
+            self.multi_tracker = MultiPersonTracker(
+                detector=self._room_detector,
+                tracker_type="bytetrack",
+                lost_track_timeout=30.0,
+            )
+            print("✅ ByteTrack tracker ready (stable IDs across occlusions)\n")
+        else:
+            self._room_detector = None
+            self.multi_tracker = None
+            print("⚠️  Multi-tracker unavailable — frame-by-frame detection only\n")
 
         # Initialize feature extractors
         print("🔧 Loading feature extractors...")
@@ -124,13 +200,37 @@ class YOLO26CompleteSystem:
         self.cross_camera = CrossCameraAdapter()
         print()
 
-        # Initialize database and alerts
+        # Initialize database
         self.database = EnhancedDatabase("data/yolo26_complete_system.db")
+
+        # ── Phase 7: API Bridge (optional) ───────────────────────────────────
+        self.api_bridge = None
+        if enable_api and _API_BRIDGE_AVAILABLE:
+            print("🔧 Starting REST / WebSocket API bridge...")
+            self.api_bridge = SecurityAPIBridge(
+                system_ref=self,
+                port=api_port,
+                cors_origins=[
+                    "http://localhost:3000",
+                    "http://localhost:5173",
+                    "http://localhost:8080",
+                    "http://localhost:5050",  # Flask analytics dashboard
+                    "http://127.0.0.1:5050",  # Flask analytics dashboard (loopback)
+                ],
+            )
+            self.api_bridge.start()
+            print(f"✅ API bridge running → http://localhost:{api_port}\n")
+        elif enable_api:
+            print("⚠️  API bridge skipped — install fastapi uvicorn to enable\n")
+
+        # ── Phase 7: Alert Manager with Telegram + WebSocket ─────────────────
         self.alert_manager = AlertManager(
             cooldown_seconds=5.0,
             console_output=True,
             file_logging=True,
             log_path="data/yolo26_system_alerts.log",
+            rules_path="configs/alert_rules.yaml",
+            api_bridge=self.api_bridge,
         )
 
         # Person registry
@@ -150,6 +250,33 @@ class YOLO26CompleteSystem:
         )  # {detection_key: [(person_id, similarity), ...]}
         self.temporal_window = 3  # Require 3-frame majority
         self.stable_ids = {}  # {detection_key: person_id} - confirmed IDs
+
+        # ── Phase 6: track_id → person_id mapping (for display & DB) ─────────
+        # Maintained separately so the room camera can label unregistered tracks
+        self._track_match_cache: dict = {}  # {track_id: (person_id, similarity, ts)}
+        self._track_cache_ttl: float = 2.0  # seconds before re-matching a track
+
+        # ── Phase 7: Behavior detectors ───────────────────────────────────────
+        if _BEHAVIORS_AVAILABLE:
+            self.loitering = LoiteringDetector(
+                loitering_threshold=60.0,
+                zone_size=100,
+                alert_cooldown=30.0,
+            )
+            self.tailgating = TailgatingDetector(
+                time_window=5.0,
+                min_persons=2,
+                check_proximity=True,
+            )
+            print("✅ Behavior detectors ready (loitering + tailgating)\n")
+        else:
+            self.loitering = None
+            self.tailgating = None
+
+        # Panic detection state (crowd velocity tracking)
+        self._crowd_velocity_window: list = []  # rolling window of per-person velocities
+        self._panic_person_threshold: int = 3  # min persons before panic check
+        self._panic_velocity_threshold: float = 3.0  # m/s crowd average
 
         # Entry cooldown (prevent duplicate registrations)
         self.entry_cooldown = {}
@@ -209,6 +336,7 @@ class YOLO26CompleteSystem:
         print("  C - Clear all registrations")
         print("  S - Show statistics")
         print("  I - Show cross-camera adapter info")
+        print("  T - Show tracker diagnostics")
         print(
             "  F - Toggle face recognition (currently: {})".format(
                 "ON" if self.use_face_recognition else "OFF"
@@ -219,6 +347,12 @@ class YOLO26CompleteSystem:
         print("  ] - Increase exit threshold (+0.05)")
         print("  [ - Decrease exit threshold (-0.05)")
         print("  Q - Quit and export data")
+        if self.api_bridge:
+            print(f"\n🌐 Frontend API: http://localhost:{api_port}")
+            print(f"   WebSocket:     ws://localhost:{api_port}/ws/events")
+            print(
+                f"   Camera feeds:  http://localhost:{api_port}/stream/{{entry|room|exit}}"
+            )
         print("=" * 70 + "\n")
 
     def _init_cameras(self):
@@ -796,6 +930,50 @@ class YOLO26CompleteSystem:
                     self.person_status[person_id] = "active"
                     self.stats["inside"] += 1
 
+                    # ── Phase 7: Tailgating detection ─────────────────────────
+                    if self.tailgating is not None:
+                        tg_event = self.tailgating.record_entry(
+                            person_id=person_id,
+                            bbox=body_bbox,
+                            is_authorized=True,
+                        )
+                        if tg_event is not None:
+                            self.alert_manager.alert_tailgating(
+                                person_count=tg_event.person_count,
+                                person_ids=tg_event.person_ids,
+                                camera_source="entry_camera",
+                                time_window=self.tailgating.time_window,
+                            )
+                            # Draw tailgating warning banner
+                            _tw_h, _tw_w = display.shape[:2]
+                            cv2.rectangle(
+                                display,
+                                (0, by + bh + 5),
+                                (_tw_w, by + bh + 35),
+                                (0, 50, 200),
+                                -1,
+                            )
+                            cv2.putText(
+                                display,
+                                f"⚠ TAILGATING: {tg_event.person_count} entries",
+                                (10, by + bh + 28),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.55,
+                                (255, 255, 255),
+                                2,
+                            )
+
+                    # ── Phase 7: Push entry event to WebSocket ────────────────
+                    if self.api_bridge is not None:
+                        self.api_bridge.push_event(
+                            "entry",
+                            {
+                                "person_id": person_id,
+                                "session_id": session_id,
+                                "timestamp": datetime.now().isoformat(),
+                            },
+                        )
+
                     # Pull extracted features from in-memory registry
                     registered_profile = self.registered_people[person_id]
                     face_embedding = registered_profile.get("face_embedding")
@@ -899,37 +1077,101 @@ class YOLO26CompleteSystem:
             1,
         )
 
+        # ── Phase 7: Tailgating indicator overlay ────────────────────────────
+        if self.tailgating is not None:
+            diag = self.tailgating.diagnostics()
+            entries_in_window = diag["entries_in_window"]
+            if entries_in_window >= 2:
+                cv2.putText(
+                    display,
+                    f"⚠ {entries_in_window} entries in {diag['window_seconds']:.0f}s window",
+                    (10, h_disp - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 100, 255),
+                    1,
+                )
+
+        # ── Phase 7: Push annotated frame to API bridge (MJPEG stream) ───────
+        if self.api_bridge is not None:
+            self.api_bridge.push_frame("entry", display)
+
         return display
 
     def process_room_camera(self, frame: np.ndarray) -> np.ndarray:
-        """Process room camera - track authorized people, calculate velocity."""
+        """Process room camera — track all people with ByteTrack, check behaviors."""
         # Apply cross-camera preprocessing FIRST
         frame_preprocessed = self.cross_camera.preprocess_frame(frame, camera_id="room")
 
         display = frame_preprocessed.copy()
         current_time = datetime.now()
 
-        # Detect people (on preprocessed frame)
-        detections = self.detector.detect(frame_preprocessed)
+        # ── Phase 6: use tracker if available, else fall back to detect() ──────
+        if self.multi_tracker is not None:
+            raw_detections = self.multi_tracker.update(frame_preprocessed)
+            # Wrap TrackedPerson objects into the legacy detection-dict format
+            # so all downstream code works unchanged.
+            detections = []
+            track_ids = []
+            for tp in raw_detections:
+                d = tp.to_detection_dict()
+                detections.append(d)
+                track_ids.append(tp.track_id)
+        else:
+            detections = self.detector.detect(frame_preprocessed)
+            track_ids = [None] * len(detections)
+
         self.stats["room_detections"] += len(detections)
         self.stats["total_detections"] += len(detections)
 
         authorized_count = 0
         unauthorized_count = 0
 
-        for detection in detections:
+        # Collect per-frame velocities for panic detection
+        frame_velocities = []
+
+        for detection, track_id in zip(detections, track_ids):
             body_bbox = detection["body_bbox"]
             bx, by, bw, bh = body_bbox
             center_x = bx + bw // 2
             center_y = by + bh // 2
 
-            # ALWAYS print room detection status (even if not debug mode)
-            print(f"\n🔍 ROOM: Person detected at ({bx}, {by}), size: {bw}x{bh}")
+            # ── Phase 6: check track cache before running expensive match ──────
+            person_id = None
+            similarity = 0.0
+            debug_info = {}
 
-            # Match against registered people (with target_camera='room')
-            person_id, similarity, debug_info = self.match_person(
-                frame_preprocessed, detection, target_camera="room"
+            cached = (
+                self._track_match_cache.get(track_id) if track_id is not None else None
             )
+            cache_valid = (
+                cached is not None and (time.time() - cached[2]) < self._track_cache_ttl
+            )
+
+            if cache_valid:
+                person_id, similarity = cached[0], cached[1]
+                debug_info = {"from_cache": True}
+            else:
+                # Full re-ID match
+                person_id, similarity, debug_info = self.match_person(
+                    frame_preprocessed, detection, target_camera="room"
+                )
+                # Update tracker association and cache
+                if track_id is not None:
+                    if person_id and self.multi_tracker is not None:
+                        self.multi_tracker.associate(track_id, person_id)
+                    self._track_match_cache[track_id] = (
+                        person_id,
+                        similarity,
+                        time.time(),
+                    )
+
+            # ALWAYS print room detection status (even if not debug mode)
+            print(
+                f"\n🔍 ROOM: Person detected at ({bx}, {by}), size: {bw}x{bh}"
+                + (f" [track={track_id}]" if track_id is not None else "")
+            )
+
             confirmed = True  # Always confirmed - no verification delay
 
             # Get adaptive threshold for display
@@ -1030,18 +1272,22 @@ class YOLO26CompleteSystem:
                     print(f"   Hint: Score {similarity:.3f} is close. Lower threshold?")
 
             # ── Trajectory + velocity tracking for ALL detections ────────────
-            # Track every person regardless of auth status so that crowd
-            # behaviour, congestion and walking/running speeds are always
-            # visible — essential for CISF threat analysis.
-            track_key = (
-                person_id if person_id else f"unauth_{center_x // 60}_{center_y // 60}"
-            )
+            # Use ByteTrack ID as the trajectory key when available — this
+            # gives stable tails even across brief occlusions.
+            if track_id is not None and track_id > 0:
+                track_key = f"t{track_id}"
+            elif person_id:
+                track_key = person_id
+            else:
+                track_key = f"unauth_{center_x // 60}_{center_y // 60}"
+
             self.trajectories[track_key].append((center_x, center_y, current_time))
             if len(self.trajectories[track_key]) > 60:
                 self.trajectories[track_key].pop(0)
 
             velocity = self._calculate_velocity(track_key)
             self.velocity_data[track_key].append(velocity)
+            frame_velocities.append(velocity)
 
             # Always draw the trajectory tail
             self._draw_trajectory(display, track_key)
@@ -1055,6 +1301,11 @@ class YOLO26CompleteSystem:
                 v_color = (0, 165, 255)  # ORANGE - fast walk
             else:
                 v_color = (0, 255, 0)  # GREEN - normal
+
+            # Show ByteTrack ID on overlay when tracker is active
+            track_label_suffix = (
+                f" [T{track_id}]" if (track_id is not None and track_id > 0) else ""
+            )
 
             cv2.putText(
                 display,
@@ -1071,29 +1322,98 @@ class YOLO26CompleteSystem:
                 # AUTHORIZED person with active session
                 authorized_count += 1
                 box_color = (0, 255, 0)  # GREEN
-                label = f"{person_id} ({similarity:.2f})"
+                label = f"{person_id} ({similarity:.2f}){track_label_suffix}"
 
                 # Store trajectory point in DB (only for registered persons)
                 self.database.add_trajectory_point(
-                    person_id, center_x, center_y, "room_camera", velocity=velocity
+                    person_id,
+                    center_x,
+                    center_y,
+                    "room_camera",
+                    velocity=velocity,
+                    track_id=track_id,
                 )
+
+                # ── Phase 7: Loitering check for authorized persons ───────────
+                if self.loitering is not None:
+                    is_loitering, dwell = self.loitering.update(
+                        person_id, center_x, center_y
+                    )
+                    if is_loitering:
+                        self.alert_manager.alert_loitering(
+                            person_id=person_id,
+                            dwell_seconds=dwell,
+                            zone=self.loitering.get_current_zone(person_id),
+                            camera_source="room_camera",
+                        )
+                        # Draw loitering indicator on frame
+                        cv2.putText(
+                            display,
+                            f"LOITERING {dwell:.0f}s",
+                            (bx, by - 30),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
+                            (0, 100, 255),
+                            2,
+                        )
+                    elif dwell > 10:
+                        # Show dwell counter as a soft indicator
+                        cv2.putText(
+                            display,
+                            f"dwell:{dwell:.0f}s",
+                            (bx, by - 30),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.35,
+                            (180, 180, 0),
+                            1,
+                        )
+
+                # ── Phase 7: Running alert for authorized person ──────────────
+                if velocity > 2.0:
+                    self.alert_manager.alert_running(
+                        person_id=person_id,
+                        velocity=velocity,
+                        camera_source="room_camera",
+                    )
 
                 # Additional debug if enabled
                 if self.debug_mode:
-                    print(f"   📊 Session active, velocity={velocity:.2f} m/s")
+                    print(
+                        f"   📊 Session active, velocity={velocity:.2f} m/s"
+                        + (f", track={track_id}" if track_id else "")
+                    )
 
             else:
                 # UNAUTHORIZED detection
                 unauthorized_count += 1
                 self.stats["unauthorized"] += 1
                 box_color = (0, 0, 255)  # RED
-                label = f"UNAUTHORIZED ({similarity:.2f})"
+                unauth_key = (
+                    f"unauth_{track_id}"
+                    if track_id
+                    else f"unauth_{center_x // 60}_{center_y // 60}"
+                )
+                label = f"UNAUTHORIZED ({similarity:.2f}){track_label_suffix}"
+
+                # ── Phase 7: Loitering check for unauthorized persons ─────────
+                if self.loitering is not None:
+                    is_loitering, dwell = self.loitering.update(
+                        unauth_key, center_x, center_y
+                    )
+                    if is_loitering:
+                        cv2.putText(
+                            display,
+                            f"LOITERING {dwell:.0f}s",
+                            (bx, by - 30),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
+                            (0, 50, 255),
+                            2,
+                        )
 
                 # Alert
-                self.alert_manager.create_alert(
-                    alert_type=AlertType.UNAUTHORIZED_ENTRY,
-                    alert_level=AlertLevel.CRITICAL,
-                    message="Unauthorized person detected in room",
+                self.alert_manager.alert_unauthorized(
+                    person_id=unauth_key,
                     camera_source="room_camera",
                 )
 
@@ -1201,6 +1521,61 @@ class YOLO26CompleteSystem:
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.35,
                 (0, 255, 255),
+                1,
+            )
+
+        # ── Phase 7: Panic behavior detection ────────────────────────────────
+        if frame_velocities and len(frame_velocities) >= self._panic_person_threshold:
+            avg_v = sum(frame_velocities) / len(frame_velocities)
+            if avg_v >= self._panic_velocity_threshold:
+                self.alert_manager.alert_panic(
+                    person_count=len(frame_velocities),
+                    avg_velocity=avg_v,
+                    camera_source="room_camera",
+                )
+                # Red panic banner
+                h_disp, w_disp = display.shape[:2]
+                cv2.rectangle(
+                    display, (0, h_disp - 35), (w_disp, h_disp), (0, 0, 200), -1
+                )
+                cv2.putText(
+                    display,
+                    f"⚠ PANIC DETECTED — {len(frame_velocities)} people @ {avg_v:.1f} m/s",
+                    (10, h_disp - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (255, 255, 255),
+                    2,
+                )
+
+        # ── Phase 7: Mass gathering check ────────────────────────────────────
+        total_in_room = authorized_count + unauthorized_count
+        mass_threshold = 5
+        if total_in_room >= mass_threshold:
+            self.alert_manager.alert_mass_gathering(
+                zone_id="room",
+                person_count=total_in_room,
+                camera_source="room_camera",
+            )
+
+        # ── Phase 7: Push annotated frame to API bridge (MJPEG stream) ───────
+        if self.api_bridge is not None:
+            self.api_bridge.push_frame("room", display)
+
+        # ── Phase 6: Tracker overlay (top-right corner) ──────────────────────
+        if self.multi_tracker is not None:
+            diag = self.multi_tracker.diagnostics()
+            h_disp, w_disp = display.shape[:2]
+            tracker_txt = (
+                f"Tracks: {diag['active_tracks']} active / {diag['lost_tracks']} lost"
+            )
+            cv2.putText(
+                display,
+                tracker_txt,
+                (w_disp - 280, 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                (180, 255, 180),
                 1,
             )
 
@@ -1354,6 +1729,27 @@ class YOLO26CompleteSystem:
                 print(f"   Avg velocity: {avg_velocity:.2f} m/s")
                 print(f"   Max velocity: {max_velocity:.2f} m/s")
 
+                # ── Phase 6: remove tracker association on exit ───────────────
+                if self.multi_tracker is not None:
+                    self.multi_tracker.dissociate(person_id)
+
+                # ── Phase 7: remove loitering state on exit ───────────────────
+                if self.loitering is not None:
+                    self.loitering.remove_person(person_id)
+
+                # ── Phase 7: push exit event to WebSocket ─────────────────────
+                if self.api_bridge is not None:
+                    self.api_bridge.push_event(
+                        "exit",
+                        {
+                            "person_id": person_id,
+                            "duration_seconds": round(duration, 1),
+                            "avg_velocity": round(avg_velocity, 3),
+                            "max_velocity": round(max_velocity, 3),
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                    )
+
             elif person_id:
                 # Person registered but no active session
                 box_color = (0, 165, 255)  # ORANGE
@@ -1420,6 +1816,10 @@ class YOLO26CompleteSystem:
             )
 
         # Status overlay — use actual frame width
+        # ── Phase 7: Push annotated frame to API bridge (MJPEG stream) ───────
+        if self.api_bridge is not None:
+            self.api_bridge.push_frame("exit", display)
+
         h_disp, w_disp = display.shape[:2]
         cv2.rectangle(display, (0, 0), (w_disp, 90), (0, 0, 0), -1)
         cv2.putText(
@@ -1552,7 +1952,16 @@ class YOLO26CompleteSystem:
                     self.last_entry_person_bbox = None
                     self.detection_history.clear()
                     self.stable_ids.clear()
+                    self._track_match_cache.clear()
                     self.stats = {k: 0 for k in self.stats}
+                    # ── Phase 6: reset tracker so ByteTrack IDs restart ────────
+                    if self.multi_tracker is not None:
+                        self.multi_tracker.reset()
+                    # ── Phase 7: reset behavior detectors ─────────────────────
+                    if self.loitering is not None:
+                        self.loitering.reset()
+                    if self.tailgating is not None:
+                        self.tailgating.reset()
                     print("✅ All data cleared\n")
                 elif key == ord("s"):
                     self.show_statistics()
@@ -1586,6 +1995,20 @@ class YOLO26CompleteSystem:
                 elif key == ord("i"):
                     # Show cross-camera adapter info
                     self.cross_camera.print_diagnostics()
+                elif key == ord("t"):
+                    # ── Phase 6: tracker diagnostics ─────────────────────────
+                    if self.multi_tracker is not None:
+                        diag = self.multi_tracker.diagnostics()
+                        print("\n" + "=" * 50)
+                        print("  TRACKER DIAGNOSTICS (ByteTrack)")
+                        print("=" * 50)
+                        print(f"  Active tracks:  {diag['active_tracks']}")
+                        print(f"  Lost tracks:    {diag['lost_tracks']}")
+                        print(f"  Total seen:     {diag['total_tracks']}")
+                        print(f"  Person map:     {diag['person_map']}")
+                        print("=" * 50 + "\n")
+                    else:
+                        print("\n⚠️  Tracker not available\n")
                 elif key == ord("f"):
                     # Toggle face recognition
                     if self.face_recognizer is not None:
@@ -1616,6 +2039,11 @@ class YOLO26CompleteSystem:
         # Persist final trajectories and write last_session.json
         print("💾 Closing database (saving trajectories + session export)...")
         self.database.close()
+
+        # ── Phase 7: stop API bridge ──────────────────────────────────────────
+        if self.api_bridge is not None:
+            print("🌐 Stopping API bridge...")
+            self.api_bridge.stop()
 
         print("📹 Releasing cameras...")
         self.cap_entry.release()
@@ -1695,6 +2123,25 @@ Run  python scripts/detect_cameras.py  to identify camera indices.
         action="store_true",
         help="Probe and list all available camera indices, then exit",
     )
+    parser.add_argument(
+        "--no-api",
+        action="store_true",
+        default=False,
+        help="Disable the FastAPI REST / WebSocket bridge (default: enabled)",
+    )
+    parser.add_argument(
+        "--api-port",
+        type=int,
+        default=8000,
+        metavar="PORT",
+        help="Port for the REST / WebSocket API bridge (default: 8000)",
+    )
+    parser.add_argument(
+        "--no-tracker",
+        action="store_true",
+        default=False,
+        help="Disable ByteTrack multi-person tracker (use frame-by-frame detection)",
+    )
     args = parser.parse_args()
 
     print("\n" + "=" * 70)
@@ -1723,9 +2170,30 @@ Run  python scripts/detect_cameras.py  to identify camera indices.
     print("         or override with --entry N --room N --exit N")
     print()
 
+    enable_api = not args.no_api
+    api_port = args.api_port
+
+    if enable_api:
+        print(f"🌐 API bridge: http://localhost:{api_port}  (--no-api to disable)")
+    else:
+        print("🌐 API bridge: disabled")
+
+    if args.no_tracker:
+        # Monkey-patch the module-level flag so __init__ skips tracker init
+        import yolo26_complete_system as _self_mod
+
+        _self_mod._TRACKER_AVAILABLE = False
+        print("⚠️  ByteTrack tracker disabled by --no-tracker flag")
+
+    print()
+
     # Create and run system
     system = YOLO26CompleteSystem(
-        entry_idx=entry_idx, room_idx=room_idx, exit_idx=exit_idx
+        entry_idx=entry_idx,
+        room_idx=room_idx,
+        exit_idx=exit_idx,
+        enable_api=enable_api,
+        api_port=api_port,
     )
     system.run()
 

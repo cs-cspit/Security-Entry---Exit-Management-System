@@ -134,9 +134,28 @@ class EnhancedDatabase:
                 y REAL,
                 timestamp TIMESTAMP,
                 velocity REAL,
+                track_id INTEGER,
                 FOREIGN KEY (person_id) REFERENCES people(person_id)
             )
         """)
+
+        # Migration: add track_id column if it doesn't exist (for existing DBs)
+        try:
+            cursor.execute("ALTER TABLE trajectory_data ADD COLUMN track_id INTEGER")
+        except Exception:
+            pass  # Column already exists — safe to ignore
+
+        # Migration: add people columns missing from older DB schemas
+        _people_migrations = [
+            "ALTER TABLE people ADD COLUMN last_seen TIMESTAMP",
+            "ALTER TABLE people ADD COLUMN encounters INTEGER DEFAULT 1",
+            "ALTER TABLE people ADD COLUMN face_embedding BLOB",
+        ]
+        for _stmt in _people_migrations:
+            try:
+                cursor.execute(_stmt)
+            except Exception:
+                pass  # Column already exists — safe to ignore
 
         # Threat events table
         cursor.execute("""
@@ -379,6 +398,7 @@ class EnhancedDatabase:
         camera_source: str,
         velocity: float = 0.0,
         timestamp: Optional[datetime] = None,
+        track_id: Optional[int] = None,
     ):
         """
         Add a trajectory point for a person.
@@ -390,6 +410,7 @@ class EnhancedDatabase:
             camera_source: Which camera recorded this
             velocity: Instantaneous velocity (m/s)
             timestamp: Time of observation (default: now)
+            track_id: ByteTrack stable track ID (Phase 6, optional)
         """
         if timestamp is None:
             timestamp = datetime.now()
@@ -400,6 +421,7 @@ class EnhancedDatabase:
             "timestamp": timestamp,
             "velocity": velocity,
             "camera_source": camera_source,
+            "track_id": track_id,
         }
 
         self.trajectories[person_id].append(trajectory_point)
@@ -742,8 +764,8 @@ class EnhancedDatabase:
             cursor.execute(
                 """
                 INSERT INTO trajectory_data (
-                    person_id, camera_source, x, y, timestamp, velocity
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    person_id, camera_source, x, y, timestamp, velocity, track_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     person_id,
@@ -752,6 +774,7 @@ class EnhancedDatabase:
                     point["y"],
                     point["timestamp"],
                     point["velocity"],
+                    point.get("track_id"),
                 ),
             )
 

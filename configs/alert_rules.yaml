@@ -1,0 +1,251 @@
+# =============================================================================
+# Alert Rules Configuration
+# Intelligence-Led Entry & Exit Management System
+# =============================================================================
+# Environment variable overrides:
+#   TELEGRAM_BOT_TOKEN  — Telegram bot token (keep out of version control)
+#   TELEGRAM_CHAT_ID    — Telegram chat/group ID to send alerts to
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Notification Channels
+# ---------------------------------------------------------------------------
+channels:
+  console:
+    enabled: true
+    color_output: true        # ANSI color codes for severity
+
+  file:
+    enabled: true
+    path: "data/alerts.log"
+    max_size_mb: 50
+    backup_count: 5           # Rotate up to 5 backup files
+
+  telegram:
+    enabled: false            # Set to true once token + chat_id are configured
+    # Recommended: export TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID as env vars
+    bot_token: ""             # Leave blank; read from env at runtime
+    chat_id: ""               # Leave blank; read from env at runtime
+    parse_mode: "HTML"        # HTML or Markdown
+    # Severity gate — only send alerts at this level or above via Telegram
+    min_level: "critical"     # info | warning | critical
+    timeout_seconds: 5
+
+  websocket:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8765
+    # Maximum events to keep in the in-memory event queue
+    # (delivered to newly-connected clients as recent history)
+    history_size: 100
+    # Ping interval to keep connections alive (seconds)
+    ping_interval: 20
+
+  rest_api:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8000
+    cors_origins:
+      - "http://localhost:3000"   # React dev server
+      - "http://localhost:5173"   # Vite dev server
+      - "http://localhost:8080"
+    # JWT secret — override via environment variable API_SECRET_KEY
+    secret_key: ""
+    # Token expiry in minutes
+    token_expiry_minutes: 60
+
+# ---------------------------------------------------------------------------
+# Global Alert Behaviour
+# ---------------------------------------------------------------------------
+global:
+  # Master cooldown: minimum seconds between identical alert keys.
+  # Individual rules below can override this.
+  default_cooldown_seconds: 5.0
+
+  # Suppress duplicate alerts within this window (seconds) even if key differs
+  dedup_window_seconds: 2.0
+
+  # Maximum alerts stored in memory before oldest are dropped
+  max_alerts_in_memory: 1000
+
+  # Alert levels (ascending severity)
+  levels:
+    - info
+    - warning
+    - critical
+
+# ---------------------------------------------------------------------------
+# Alert Rules
+# ---------------------------------------------------------------------------
+# Each rule controls one alert type.
+# Fields:
+#   enabled         — master on/off switch
+#   level           — info | warning | critical
+#   cooldown        — seconds between repeated alerts for the same key
+#   notify          — list of channels to use (must be defined above)
+#   <type-specific> — additional parameters for the detector
+# ---------------------------------------------------------------------------
+
+rules:
+
+  unauthorized_entry:
+    enabled: true
+    level: critical
+    cooldown: 10
+    notify:
+      - console
+      - file
+      - telegram
+      - websocket
+    # Extra metadata
+    description: "Person detected who is not in the registered-persons registry"
+
+  running:
+    enabled: true
+    level: warning
+    cooldown: 5
+    notify:
+      - console
+      - file
+      - websocket
+    # Velocity threshold (m/s) — persons above this speed are flagged
+    velocity_threshold: 2.0
+    description: "Person moving above walking speed"
+
+  loitering:
+    enabled: true
+    level: warning
+    cooldown: 30
+    notify:
+      - console
+      - file
+      - websocket
+    # Seconds a person must remain in the same zone before alerting
+    time_threshold: 60
+    # Pixel size of each detection zone (grid cell)
+    zone_size: 100
+    description: "Person remaining stationary in one area for an extended period"
+
+  tailgating:
+    enabled: true
+    level: warning
+    cooldown: 15
+    notify:
+      - console
+      - file
+      - telegram
+      - websocket
+    # Rolling time window (seconds) in which multiple entries trigger alert
+    time_window: 5
+    # Minimum number of persons in the window to trigger
+    min_persons: 2
+    # Require spatial proximity check (IoU ≥ min_overlap)
+    check_proximity: true
+    min_overlap: 0.10
+    description: "Multiple persons entering in rapid succession (possible tailgating)"
+
+  mass_gathering:
+    enabled: true
+    level: warning
+    cooldown: 30
+    notify:
+      - console
+      - file
+      - telegram
+      - websocket
+    # Number of persons in the room simultaneously to trigger
+    person_threshold: 5
+    description: "Unusually large number of persons detected in the room"
+
+  high_threat:
+    enabled: true
+    level: critical
+    cooldown: 10
+    notify:
+      - console
+      - file
+      - telegram
+      - websocket
+    # Combined threat score threshold (0–1)
+    score_threshold: 0.80
+    description: "Composite threat score exceeded critical threshold"
+
+  panic_behavior:
+    enabled: true
+    level: critical
+    cooldown: 15
+    notify:
+      - console
+      - file
+      - telegram
+      - websocket
+    # Average velocity of ALL persons in frame above which panic is suspected
+    crowd_velocity_threshold: 3.0
+    # Minimum person count required before evaluating (avoid single-person false positives)
+    min_person_count: 3
+    description: "Multiple persons moving rapidly — possible panic or stampede"
+
+  door_forced:
+    enabled: false            # Requires integration with door sensor GPIO/API
+    level: critical
+    cooldown: 5
+    notify:
+      - console
+      - file
+      - telegram
+      - websocket
+    description: "Door opened without valid access credential"
+
+# ---------------------------------------------------------------------------
+# Threat Score Calculation Weights
+# These mirror system_config.yaml but are re-declared here so the alert
+# engine can recalculate threat scores independently.
+# ---------------------------------------------------------------------------
+threat_score:
+  weights:
+    velocity: 0.40
+    trajectory_entropy: 0.30
+    proximity_density: 0.30
+  warning_threshold: 0.50
+  critical_threshold: 0.80
+
+# ---------------------------------------------------------------------------
+# Loitering Detector Defaults (can be overridden per-rule above)
+# ---------------------------------------------------------------------------
+loitering:
+  threshold_seconds: 60
+  zone_size_pixels: 100
+  alert_cooldown_seconds: 30
+  stale_timeout_seconds: 120
+
+# ---------------------------------------------------------------------------
+# Tailgating Detector Defaults
+# ---------------------------------------------------------------------------
+tailgating:
+  time_window_seconds: 5
+  min_persons: 2
+  check_proximity: true
+  min_overlap: 0.10
+  alert_cooldown_seconds: 10
+
+# ---------------------------------------------------------------------------
+# Notification Templates
+# Used to format alert messages for Telegram / WebSocket payloads
+# ---------------------------------------------------------------------------
+templates:
+  unauthorized_entry: "🚨 <b>UNAUTHORIZED ENTRY</b>\nPerson: {person_id}\nCamera: {camera}\nTime: {time}"
+  running: "⚠️ <b>RUNNING DETECTED</b>\nPerson: {person_id}\nVelocity: {velocity:.2f} m/s\nCamera: {camera}"
+  loitering: "⚠️ <b>LOITERING ALERT</b>\nPerson: {person_id}\nDwell time: {dwell:.0f}s\nZone: {zone}"
+  tailgating: "⚠️ <b>TAILGATING ALERT</b>\n{count} persons entered within {window}s\nIDs: {persons}"
+  mass_gathering: "⚠️ <b>MASS GATHERING</b>\n{count} persons in room\nCamera: {camera}"
+  high_threat: "🚨 <b>HIGH THREAT SCORE</b>\nPerson: {person_id}\nScore: {score:.2f}\nCamera: {camera}"
+  panic_behavior: "🚨 <b>PANIC BEHAVIOUR DETECTED</b>\n{count} persons moving rapidly\nAvg velocity: {velocity:.2f} m/s"
+
+# ---------------------------------------------------------------------------
+# Version
+# ---------------------------------------------------------------------------
+metadata:
+  version: "2.0.0"
+  phase: "7"
+  last_updated: "2026-01-14"
+  config_schema: "alert_rules_v2"

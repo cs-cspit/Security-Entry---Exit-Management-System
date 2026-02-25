@@ -1,0 +1,2103 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Security Analytics Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0e1a;
+            --bg-secondary: #111827;
+            --bg-card: #1a1f35;
+            --bg-card-hover: #1f2545;
+            --border-color: #2a3150;
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent-blue: #3b82f6;
+            --accent-cyan: #06b6d4;
+            --accent-green: #10b981;
+            --accent-yellow: #f59e0b;
+            --accent-red: #ef4444;
+            --accent-purple: #8b5cf6;
+            --accent-pink: #ec4899;
+            --glow-blue: rgba(59, 130, 246, 0.15);
+            --glow-red: rgba(239, 68, 68, 0.15);
+            --glow-green: rgba(16, 185, 129, 0.15);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        .mono { font-family: 'JetBrains Mono', monospace; }
+
+        /* Animated gradient background */
+        .bg-mesh {
+            position: fixed;
+            inset: 0;
+            z-index: -1;
+            background:
+                radial-gradient(ellipse at 20% 50%, rgba(59, 130, 246, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 20%, rgba(139, 92, 246, 0.06) 0%, transparent 50%),
+                radial-gradient(ellipse at 50% 80%, rgba(6, 182, 212, 0.05) 0%, transparent 50%),
+                var(--bg-primary);
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg-primary); }
+        ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #3a4170; }
+
+        /* Glass card effect */
+        .glass-card {
+            background: linear-gradient(135deg, rgba(26, 31, 53, 0.9), rgba(17, 24, 39, 0.95));
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            backdrop-filter: blur(12px);
+            transition: all 0.3s ease;
+        }
+        .glass-card:hover {
+            border-color: #3a4170;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+
+        /* KPI Card styles */
+        .kpi-card {
+            position: relative;
+            overflow: hidden;
+        }
+        .kpi-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            border-radius: 16px 16px 0 0;
+        }
+        .kpi-card.blue::before { background: linear-gradient(90deg, #3b82f6, #06b6d4); }
+        .kpi-card.green::before { background: linear-gradient(90deg, #10b981, #34d399); }
+        .kpi-card.red::before { background: linear-gradient(90deg, #ef4444, #f97316); }
+        .kpi-card.yellow::before { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+        .kpi-card.purple::before { background: linear-gradient(90deg, #8b5cf6, #a78bfa); }
+        .kpi-card.cyan::before { background: linear-gradient(90deg, #06b6d4, #22d3ee); }
+
+        .kpi-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+        }
+        .kpi-icon.blue { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+        .kpi-icon.green { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+        .kpi-icon.red { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+        .kpi-icon.yellow { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+        .kpi-icon.purple { background: rgba(139, 92, 246, 0.15); color: #a78bfa; }
+        .kpi-icon.cyan { background: rgba(6, 182, 212, 0.15); color: #22d3ee; }
+
+        .kpi-value {
+            font-size: 2rem;
+            font-weight: 800;
+            line-height: 1;
+            letter-spacing: -0.02em;
+        }
+
+        /* Nav */
+        .nav-item {
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-weight: 500;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .nav-item:hover { background: rgba(59, 130, 246, 0.1); color: var(--text-primary); }
+        .nav-item.active { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+
+        /* Section tabs */
+        .section-tab {
+            padding: 10px 20px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            transition: all 0.25s;
+            border: 1px solid transparent;
+        }
+        .section-tab:hover { color: var(--text-primary); background: rgba(255,255,255,0.03); }
+        .section-tab.active {
+            color: #60a5fa;
+            background: rgba(59, 130, 246, 0.1);
+            border-color: rgba(59, 130, 246, 0.3);
+        }
+
+        /* Section visibility */
+        .dashboard-section { display: none; }
+        .dashboard-section.active { display: block; }
+
+        /* Alert badge */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 3px 10px;
+            border-radius: 9999px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .badge-info { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+        .badge-warning { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+        .badge-critical { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+        .badge-green { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+        .badge-purple { background: rgba(139, 92, 246, 0.15); color: #a78bfa; }
+
+        /* State badges */
+        .state-inside_now { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+        .state-exited { background: rgba(100, 116, 139, 0.15); color: #94a3b8; }
+        .state-unauthorized { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+        .state-waiting_to_enter { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+
+        /* Table styles */
+        .data-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+        }
+        .data-table th {
+            text-align: left;
+            padding: 12px 16px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border-color);
+            position: sticky;
+            top: 0;
+            background: var(--bg-card);
+            z-index: 1;
+        }
+        .data-table td {
+            padding: 10px 16px;
+            font-size: 0.85rem;
+            border-bottom: 1px solid rgba(42, 49, 80, 0.5);
+            color: var(--text-secondary);
+        }
+        .data-table tbody tr {
+            transition: background 0.15s;
+        }
+        .data-table tbody tr:hover {
+            background: rgba(59, 130, 246, 0.05);
+        }
+
+        /* Pulse animation for live indicator */
+        @keyframes pulse-live {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.3); }
+        }
+        .live-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #10b981;
+            animation: pulse-live 2s ease-in-out infinite;
+            display: inline-block;
+        }
+        .live-dot.off {
+            background: #475569;
+            animation: none;
+        }
+
+        /* Fade-in animation */
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-in {
+            animation: fadeInUp 0.5s ease forwards;
+        }
+        .animate-in:nth-child(1) { animation-delay: 0.05s; }
+        .animate-in:nth-child(2) { animation-delay: 0.1s; }
+        .animate-in:nth-child(3) { animation-delay: 0.15s; }
+        .animate-in:nth-child(4) { animation-delay: 0.2s; }
+        .animate-in:nth-child(5) { animation-delay: 0.25s; }
+        .animate-in:nth-child(6) { animation-delay: 0.3s; }
+
+        /* Chart containers */
+        .chart-container {
+            position: relative;
+            width: 100%;
+            padding: 16px;
+        }
+        .chart-container canvas {
+            max-height: 350px;
+        }
+
+        /* Search bar */
+        .search-input {
+            background: rgba(17, 24, 39, 0.8);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 10px 16px 10px 42px;
+            color: var(--text-primary);
+            font-size: 0.875rem;
+            width: 100%;
+            transition: all 0.2s;
+            outline: none;
+        }
+        .search-input:focus {
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+        }
+        .search-input::placeholder { color: var(--text-muted); }
+
+        /* Modal / detail panel */
+        .detail-panel {
+            position: fixed;
+            top: 0;
+            right: -520px;
+            width: 500px;
+            height: 100vh;
+            background: var(--bg-secondary);
+            border-left: 1px solid var(--border-color);
+            z-index: 50;
+            transition: right 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+            overflow-y: auto;
+            padding: 24px;
+            box-shadow: -8px 0 32px rgba(0,0,0,0.5);
+        }
+        .detail-panel.open { right: 0; }
+        .detail-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 49;
+            display: none;
+        }
+        .detail-overlay.open { display: block; }
+
+        /* Heatmap canvas */
+        #heatmapCanvas {
+            background: rgba(17, 24, 39, 0.6);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+        }
+
+        /* Threat score bar */
+        .threat-bar {
+            height: 6px;
+            border-radius: 3px;
+            background: var(--border-color);
+            overflow: hidden;
+        }
+        .threat-bar-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.6s ease;
+        }
+
+        /* Loading skeleton */
+        .skeleton {
+            background: linear-gradient(90deg, var(--bg-card) 25%, rgba(42, 49, 80, 0.5) 50%, var(--bg-card) 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.5s infinite;
+            border-radius: 8px;
+        }
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+
+        /* Responsive fixes */
+        @media (max-width: 1024px) {
+            .sidebar { display: none !important; }
+            .main-content { margin-left: 0 !important; }
+            .detail-panel { width: 100%; right: -100%; }
+        }
+
+        /* Mini sparkline */
+        .sparkline-container { height: 40px; width: 100%; }
+    </style>
+</head>
+<body>
+    <div class="bg-mesh"></div>
+
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar fixed left-0 top-0 h-full w-[240px] border-r border-[#2a3150] bg-[#0d1221]/95 backdrop-blur-xl z-30 flex flex-col" style="display:flex;">
+        <!-- Logo -->
+        <div class="p-5 border-b border-[#2a3150]">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center text-white font-bold text-lg shadow-lg shadow-blue-500/20">S</div>
+                <div>
+                    <h1 class="text-sm font-bold text-white tracking-tight">SecureVision</h1>
+                    <p class="text-[10px] text-[#64748b] font-medium tracking-wider uppercase">Analytics Platform</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Nav links -->
+        <nav class="flex-1 p-3 space-y-1 overflow-y-auto">
+            <div class="px-3 py-2 text-[10px] font-semibold text-[#475569] uppercase tracking-widest">Main</div>
+            <div class="nav-item active" data-section="overview" onclick="switchSection('overview')">
+                <span>📊</span></span> Overview
+            </div>
+            <div class="nav-item" data-section="people" onclick="switchSection('people')">
+                <span>👥</span> People
+            </div>
+            <div class="nav-item" data-section="alerts" onclick="switchSection('alerts')">
+                <span>🔔</span> Alerts
+            </div>
+
+            <div class="px-3 py-2 mt-4 text-[10px] font-semibold text-[#475569] uppercase tracking-widest">Analysis</div>
+            <div class="nav-item" data-section="threats" onclick="switchSection('threats')">
+                <span>⚠️</span> Threat Analysis
+            </div>
+            <div class="nav-item" data-section="velocity" onclick="switchSection('velocity')">
+                <span>🏃</span> Velocity
+            </div>
+            <div class="nav-item" data-section="heatmap" onclick="switchSection('heatmap')">
+                <span>🗺️</span> Heatmap
+            </div>
+
+            <div class="px-3 py-2 mt-4 text-[10px] font-semibold text-[#475569] uppercase tracking-widest">System</div>
+            <div class="nav-item" data-section="cameras" onclick="switchSection('cameras')">
+                <span>📹</span> Cameras
+            </div>
+            <div class="nav-item" data-section="live" onclick="switchSection('live')">
+                <span class="live-dot"></span> Live Feed
+            </div>
+        </nav>
+
+        <!-- Status -->
+        <div class="p-4 border-t border-[#2a3150]">
+            <div class="flex items-center gap-2 text-xs" id="sidebar-bridge-status">
+                <span class="live-dot {% if bridge_running %}{% else %}off{% endif %}" id="sidebar-dot"></span>
+                <span class="text-[#94a3b8]" id="sidebar-status-text">{% if bridge_running %}Cameras Active ({{ bridge_mode }}){% else %}Cameras Off{% endif %}</span>
+            </div>
+            <div class="mt-2 flex gap-2">
+                <a href="/monitor" class="flex-1 px-2 py-1.5 rounded-md bg-blue-500/10 border border-blue-500/20 text-blue-400 text-[10px] font-medium text-center hover:bg-blue-500/20 transition cursor-pointer">
+                    Live Monitor
+                </a>
+                <button onclick="resetDatabase()" class="flex-1 px-2 py-1.5 rounded-md bg-red-500/10 border border-red-500/20 text-red-400 text-[10px] font-medium text-center hover:bg-red-500/20 transition cursor-pointer" title="Clear all analytics data">
+                    Reset Data
+                </button>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content ml-[240px] min-h-screen">
+        <!-- Top Bar -->
+        <header class="sticky top-0 z-20 border-b border-[#2a3150] bg-[#0a0e1a]/90 backdrop-blur-xl">
+            <div class="px-6 py-3 flex items-center justify-between">
+                <div class="flex items-center gap-4">
+                    <h2 class="text-lg font-bold text-white" id="section-title">Overview</h2>
+                    <span class="text-xs text-[#64748b] mono" id="last-updated">--</span>
+                </div>
+                <div class="flex items-center gap-3">
+                    <div class="relative">
+                        <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#64748b]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                        <input type="text" class="search-input w-64" placeholder="Search people, alerts..." id="globalSearch" onkeyup="handleSearch(event)">
+                    </div>
+                    <button onclick="refreshAll()" class="px-3 py-2 rounded-lg bg-[#1a1f35] border border-[#2a3150] text-[#94a3b8] hover:text-white hover:border-blue-500/40 transition text-sm flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                        Refresh
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Content Sections -->
+        <div class="p-6">
+
+            <!-- Bridge Status Banner -->
+            <div id="bridge-banner" class="mb-4 px-5 py-4 rounded-xl border backdrop-blur-sm transition-all duration-300 {% if bridge_running %}bg-emerald-500/5 border-emerald-500/20{% else %}bg-amber-500/8 border-amber-500/20{% endif %}">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-3">
+                        <div class="w-2.5 h-2.5 rounded-full {% if bridge_running %}bg-emerald-400 shadow-lg shadow-emerald-500/40{% else %}bg-amber-400{% endif %}" style="{% if bridge_running %}animation:pulse 2s infinite{% endif %}"></div>
+                        <div>
+                            <span class="text-sm font-semibold {% if bridge_running %}text-emerald-300{% else %}text-amber-300{% endif %}" id="banner-title">
+                                {% if bridge_running %}Cameras Active — Live Data Flowing{% else %}Cameras Offline — No Data Being Collected{% endif %}
+                            </span>
+                            <p class="text-xs text-[#64748b] mt-0.5" id="banner-subtitle">
+                                {% if bridge_running %}All analytics below reflect real-time camera detections ({{ bridge_mode }} mode){% else %}Start cameras from the <a href="/monitor" class="text-blue-400 hover:underline">Live Monitor</a> to begin collecting analytics data{% endif %}
+                            </p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <a href="/monitor" class="px-3 py-1.5 rounded-lg bg-blue-500/10 border border-blue-500/30 text-blue-400 text-xs font-medium hover:bg-blue-500/20 transition">
+                            {% if bridge_running %}Open Monitor{% else %}Start Cameras{% endif %}
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ============================================================ -->
+            <!-- OVERVIEW SECTION -->
+            <!-- ============================================================ -->
+            <div id="section-overview" class="dashboard-section active">
+                <!-- KPI Cards Row -->
+                <div class="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 mb-6" id="kpi-grid">
+                    <div class="glass-card kpi-card blue p-5 animate-in">
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="kpi-icon blue">👥</div>
+                            <span class="text-xs text-[#64748b] font-medium">Total</span>
+                        </div>
+                        <div class="kpi-value text-white" id="kpi-total-people">--</div>
+                        <div class="text-xs text-[#64748b] mt-1">People Tracked</div>
+                    </div>
+                    <div class="glass-card kpi-card green p-5 animate-in">
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="kpi-icon green">🟢</div>
+                            <span class="text-xs text-[#64748b] font-medium">Now</span>
+                        </div>
+                        <div class="kpi-value text-emerald-400" id="kpi-inside">--</div>
+                        <div class="text-xs text-[#64748b] mt-1">Currently Inside</div>
+                    </div>
+                    <div class="glass-card kpi-card cyan p-5 animate-in">
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="kpi-icon cyan">🚪</div>
+                            <span class="text-xs text-[#64748b] font-medium">In/Out</span>
+                        </div>
+                        <div class="flex items-baseline gap-2">
+                            <span class="kpi-value text-cyan-400" id="kpi-entries">--</span>
+                            <span class="text-lg text-[#475569]">/</span>
+                            <span class="kpi-value text-cyan-400" id="kpi-exits" style="font-size:1.4rem">--</span>
+                        </div>
+                        <div class="text-xs text-[#64748b] mt-1">Entries / Exits</div>
+                    </div>
+                    <div class="glass-card kpi-card red p-5 animate-in">
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="kpi-icon red">🚨</div>
+                            <span class="text-xs text-[#64748b] font-medium">Unauth</span>
+                        </div>
+                        <div class="kpi-value text-red-400" id="kpi-unauthorized">--</div>
+                        <div class="text-xs text-[#64748b] mt-1">Unauthorized</div>
+                    </div>
+                    <div class="glass-card kpi-card yellow p-5 animate-in">
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="kpi-icon yellow">🔔</div>
+                            <span class="text-xs text-[#64748b] font-medium">Alerts</span>
+                        </div>
+                        <div class="kpi-value text-amber-400" id="kpi-alerts">--</div>
+                        <div class="text-xs text-[#64748b] mt-1">Total Alerts</div>
+                    </div>
+                    <div class="glass-card kpi-card purple p-5 animate-in">
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="kpi-icon purple">⚡</div>
+                            <span class="text-xs text-[#64748b] font-medium">Threats</span>
+                        </div>
+                        <div class="kpi-value text-purple-400" id="kpi-threats">--</div>
+                        <div class="text-xs text-[#64748b] mt-1">Threat Events</div>
+                    </div>
+                </div>
+
+                <!-- Charts Row 1 -->
+                <div class="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
+                    <!-- Entry/Exit Timeline -->
+                    <div class="glass-card p-5">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="font-semibold text-white text-sm">Entry & Exit Timeline</h3>
+                            <span class="badge badge-info">7 Days</span>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chart-entry-exit"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Alerts Timeline -->
+                    <div class="glass-card p-5">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="font-semibold text-white text-sm">Alert Activity</h3>
+                            <span class="badge badge-warning">7 Days</span>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chart-alerts-timeline"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Charts Row 2 -->
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+                    <!-- People State Distribution -->
+                    <div class="glass-card p-5">
+                        <h3 class="font-semibold text-white text-sm mb-4">People by State</h3>
+                        <div class="chart-container" style="max-height:280px;">
+                            <canvas id="chart-people-states"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Alert Type Distribution -->
+                    <div class="glass-card p-5">
+                        <h3 class="font-semibold text-white text-sm mb-4">Alerts by Type</h3>
+                        <div class="chart-container" style="max-height:280px;">
+                            <canvas id="chart-alert-types"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Threat Score Distribution -->
+                    <div class="glass-card p-5">
+                        <h3 class="font-semibold text-white text-sm mb-4">Threat Severity</h3>
+                        <div class="chart-container" style="max-height:280px;">
+                            <canvas id="chart-threat-dist"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Recent Activity + Quick Stats -->
+                <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+                    <!-- Recent Alerts -->
+                    <div class="glass-card p-5 xl:col-span-2">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="font-semibold text-white text-sm">Recent Alerts</h3>
+                            <button class="text-xs text-blue-400 hover:text-blue-300" onclick="switchSection('alerts')">View All →</button>
+                        </div>
+                        <div class="overflow-y-auto" style="max-height: 320px;" id="recent-alerts-list">
+                                <div class="text-center text-[#475569] text-sm py-8">No alerts yet — data will appear when cameras detect events</div>
+                            </div>
+                    </div>
+
+                    <!-- Quick Stats Panel -->
+                    <div class="glass-card p-5">
+                        <h3 class="font-semibold text-white text-sm mb-4">Quick Stats</h3>
+                        <div class="space-y-4">
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-[#94a3b8]">Avg Visit Duration</span>
+                                <span class="text-sm font-semibold text-white mono" id="stat-avg-duration">--</span>
+                            </div>
+                            <div class="w-full h-px bg-[#2a3150]"></div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-[#94a3b8]">Avg Velocity</span>
+                                <span class="text-sm font-semibold text-white mono" id="stat-avg-velocity">--</span>
+                            </div>
+                            <div class="w-full h-px bg-[#2a3150]"></div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-[#94a3b8]">Avg Threat Score</span>
+                                <span class="text-sm font-semibold text-white mono" id="stat-avg-threat">--</span>
+                            </div>
+                            <div class="w-full h-px bg-[#2a3150]"></div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-[#94a3b8]">Max Threat Score</span>
+                                <span class="text-sm font-semibold text-red-400 mono" id="stat-max-threat">--</span>
+                            </div>
+                            <div class="w-full h-px bg-[#2a3150]"></div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-[#94a3b8]">Critical Alerts</span>
+                                <span class="text-sm font-semibold text-red-400 mono" id="stat-critical">--</span>
+                            </div>
+                            <div class="w-full h-px bg-[#2a3150]"></div>
+                            <div>
+                                <div class="flex items-center justify-between mb-2">
+                                    <span class="text-sm text-[#94a3b8]">System Threat Level</span>
+                                </div>
+                                <div class="threat-bar">
+                                    <div class="threat-bar-fill" id="system-threat-bar" style="width:0%;background:linear-gradient(90deg,#10b981,#f59e0b,#ef4444);"></div>
+                                </div>
+                                <div class="text-right text-xs text-[#64748b] mt-1 mono" id="system-threat-label">--</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Visit Duration Distribution -->
+                <div class="glass-card p-5 mt-6">
+                    <h3 class="font-semibold text-white text-sm mb-4">Visit Duration Distribution</h3>
+                    <div class="chart-container">
+                        <canvas id="chart-duration-dist"></canvas>
+                    </div>
+                </div>
+            </div>
+
+
+            <!-- ============================================================ -->
+            <!-- PEOPLE SECTION -->
+            <!-- ============================================================ -->
+            <div id="section-people" class="dashboard-section">
+                <!-- Filter Bar -->
+                <div class="glass-card p-4 mb-6 flex flex-wrap items-center gap-3">
+                    <span class="text-sm text-[#94a3b8] font-medium">Filter by state:</span>
+                    <button class="section-tab active" data-state="" onclick="filterPeople(this, '')">All</button>
+                    <button class="section-tab" data-state="inside_now" onclick="filterPeople(this, 'inside_now')">🟢 Inside</button>
+                    <button class="section-tab" data-state="exited" onclick="filterPeople(this, 'exited')">🔵 Exited</button>
+                    <button class="section-tab" data-state="unauthorized" onclick="filterPeople(this, 'unauthorized')">🔴 Unauthorized</button>
+                    <div class="ml-auto flex items-center gap-2">
+                        <label class="text-xs text-[#64748b]">Sort:</label>
+                        <select id="people-sort" onchange="loadPeople()" class="bg-[#111827] border border-[#2a3150] rounded-lg px-3 py-1.5 text-xs text-[#94a3b8] outline-none focus:border-blue-500">
+                            <option value="created_at">Newest</option>
+                            <option value="threat_score">Threat Score</option>
+                            <option value="max_velocity">Max Velocity</option>
+                            <option value="duration_seconds">Duration</option>
+                            <option value="alert_count">Alert Count</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- People Table -->
+                <div class="glass-card overflow-hidden">
+                    <div class="overflow-x-auto" style="max-height: 70vh;">
+                        <table class="data-table" id="people-table">
+                            <thead>
+                                <tr>
+                                    <th>Person ID</th>
+                                    <th>State</th>
+                                    <th>Entry Time</th>
+                                    <th>Duration</th>
+                                    <th>Avg Velocity</th>
+                                    <th>Max Velocity</th>
+                                    <th>Threat Score</th>
+                                    <th>Alerts</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="people-tbody">
+                                <tr><td colspan="9" class="text-center text-[#475569] py-12"><div class="flex flex-col items-center"><div class="text-2xl mb-2 opacity-30">👥</div><div class="text-sm">No people detected yet</div><div class="text-xs text-[#3a4256] mt-1">People will appear here when cameras detect entries</div></div></td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="p-4 border-t border-[#2a3150] flex items-center justify-between">
+                        <span class="text-xs text-[#64748b]" id="people-count">-- people</span>
+                        <div class="flex gap-2">
+                            <button onclick="peoplePrevPage()" class="px-3 py-1 rounded-lg bg-[#111827] border border-[#2a3150] text-xs text-[#94a3b8] hover:text-white transition" id="people-prev-btn">← Prev</button>
+                            <span class="text-xs text-[#64748b] flex items-center px-2 mono" id="people-page-info">Page 1</span>
+                            <button onclick="peopleNextPage()" class="px-3 py-1 rounded-lg bg-[#111827] border border-[#2a3150] text-xs text-[#94a3b8] hover:text-white transition" id="people-next-btn">Next →</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+
+            <!-- ============================================================ -->
+            <!-- ALERTS SECTION -->
+            <!-- ============================================================ -->
+            <div id="section-alerts" class="dashboard-section">
+                <!-- Alert Summary Cards -->
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6" id="alert-summary-cards">
+                    <div class="glass-card p-4">
+                        <div class="text-xs text-[#64748b] mb-1">Total Alerts</div>
+                        <div class="text-2xl font-bold text-white mono" id="alert-total">--</div>
+                    </div>
+                    <div class="glass-card p-4">
+                        <div class="text-xs text-blue-400 mb-1">ℹ️ Info</div>
+                        <div class="text-2xl font-bold text-blue-400 mono" id="alert-info-count">--</div>
+                    </div>
+                    <div class="glass-card p-4">
+                        <div class="text-xs text-amber-400 mb-1">⚠️ Warning</div>
+                        <div class="text-2xl font-bold text-amber-400 mono" id="alert-warn-count">--</div>
+                    </div>
+                    <div class="glass-card p-4">
+                        <div class="text-xs text-red-400 mb-1">🚨 Critical</div>
+                        <div class="text-2xl font-bold text-red-400 mono" id="alert-crit-count">--</div>
+                    </div>
+                </div>
+
+                <!-- Alert Filters + Charts -->
+                <div class="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
+                    <div class="glass-card p-5">
+                        <h3 class="font-semibold text-white text-sm mb-4">Alerts by Type</h3>
+                        <div class="chart-container" style="max-height:280px;">
+                            <canvas id="chart-alerts-by-type"></canvas>
+                        </div>
+                    </div>
+                    <div class="glass-card p-5">
+                        <h3 class="font-semibold text-white text-sm mb-4">Alerts by Camera</h3>
+                        <div class="chart-container" style="max-height:280px;">
+                            <canvas id="chart-alerts-by-camera"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Filters -->
+                <div class="glass-card p-4 mb-4 flex flex-wrap items-center gap-3">
+                    <span class="text-sm text-[#94a3b8] font-medium">Level:</span>
+                    <button class="section-tab active" onclick="filterAlerts(this, '')" data-level="">All</button>
+                    <button class="section-tab" onclick="filterAlerts(this, 'info')" data-level="info">ℹ️ Info</button>
+                    <button class="section-tab" onclick="filterAlerts(this, 'warning')" data-level="warning">⚠️ Warning</button>
+                    <button class="section-tab" onclick="filterAlerts(this, 'critical')" data-level="critical">🚨 Critical</button>
+                </div>
+
+                <!-- Alert Table -->
+                <div class="glass-card overflow-hidden">
+                    <div class="overflow-x-auto" style="max-height:60vh;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Level</th>
+                                    <th>Type</th>
+                                    <th>Person</th>
+                                    <th>Camera</th>
+                                    <th>Message</th>
+                                </tr>
+                            </thead>
+                            <tbody id="alerts-tbody">
+                                <tr><td colspan="6" class="text-center text-[#475569] py-12"><div class="flex flex-col items-center"><div class="text-2xl mb-2 opacity-30">🔔</div><div class="text-sm">No alerts detected yet</div><div class="text-xs text-[#3a4256] mt-1">Alerts will appear here when cameras detect security events</div></div></td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="p-4 border-t border-[#2a3150] flex items-center justify-between">
+                        <span class="text-xs text-[#64748b]" id="alerts-count">-- alerts</span>
+                        <div class="flex gap-2">
+                            <button onclick="alertsPrevPage()" class="px-3 py-1 rounded-lg bg-[#111827] border border-[#2a3150] text-xs text-[#94a3b8] hover:text-white transition">← Prev</button>
+                            <span class="text-xs text-[#64748b] flex items-center px-2 mono" id="alerts-page-info">Page 1</span>
+                            <button onclick="alertsNextPage()" class="px-3 py-1 rounded-lg bg-[#111827] border border-[#2a3150] text-xs text-[#94a3b8] hover:text-white transition">Next →</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+
+            <!-- ============================================================ -->
+            <!-- THREATS SECTION -->
+            <!-- ============================================================ -->
+            <div id="section-threats" class="dashboard-section">
+                <div class="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
+                    <!-- Threat Score Timeline -->
+                    <div class="glass-card p-5">
+                        <h3 class="font-semibold text-white text-sm mb-4">Threat Events Over Time</h3>
+                        <div class="chart-container">
+                            <canvas id="chart-threats-timeline"></canvas>
+                        </div>
+                    </div>
+                    <!-- Threat by Type -->
+                    <div class="glass-card p-5">
+                        <h3 class="font-semibold text-white text-sm mb-4">Threats by Event Type</h3>
+                        <div class="chart-container">
+                            <canvas id="chart-threats-by-type"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Threat Score Distribution Detailed -->
+                <div class="glass-card p-5 mb-6">
+                    <h3 class="font-semibold text-white text-sm mb-4">Threat Score Distribution (Detailed)</h3>
+                    <div class="chart-container">
+                        <canvas id="chart-threats-score-detail"></canvas>
+                    </div>
+                </div>
+
+                <!-- Threats Table -->
+                <div class="glass-card overflow-hidden">
+                    <div class="p-4 border-b border-[#2a3150]">
+                        <h3 class="font-semibold text-white text-sm">Recent Threat Events</h3>
+                    </div>
+                    <div class="overflow-x-auto" style="max-height:50vh;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Person</th>
+                                    <th>Event Type</th>
+                                    <th>Threat Score</th>
+                                    <th>Velocity</th>
+                                    <th>Entropy</th>
+                                    <th>Density</th>
+                                    <th>Camera</th>
+                                </tr>
+                            </thead>
+                            <tbody id="threats-tbody">
+                                <tr><td colspan="8" class="text-center text-[#475569] py-12"><div class="flex flex-col items-center"><div class="text-2xl mb-2 opacity-30">⚠️</div><div class="text-sm">No threat events yet</div><div class="text-xs text-[#3a4256] mt-1">Threats will appear here when cameras detect suspicious activity</div></div></td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+
+            <!-- ============================================================ -->
+            <!-- VELOCITY SECTION -->
+            <!-- ============================================================ -->
+            <div id="section-velocity" class="dashboard-section">
+                <div class="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
+                    <!-- Velocity Distribution -->
+                    <div class="glass-card p-5">
+                        <h3 class="font-semibold text-white text-sm mb-4">Velocity Distribution</h3>
+                        <div class="chart-container">
+                            <canvas id="chart-velocity-dist"></canvas>
+                        </div>
+                    </div>
+                    <!-- Velocity vs Threat -->
+                    <div class="glass-card p-5">
+                        <h3 class="font-semibold text-white text-sm mb-4">Velocity vs Threat Score</h3>
+                        <div class="chart-container">
+                            <canvas id="chart-velocity-threat"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Top Velocities -->
+                <div class="glass-card overflow-hidden">
+                    <div class="p-4 border-b border-[#2a3150]">
+                        <h3 class="font-semibold text-white text-sm">Top Speed People</h3>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Person ID</th>
+                                    <th>Avg Velocity</th>
+                                    <th>Max Velocity</th>
+                                    <th>Threat Score</th>
+                                    <th>State</th>
+                                </tr>
+                            </thead>
+                            <tbody id="velocity-top-tbody">
+                                <tr><td colspan="6" class="text-center text-[#475569] py-8">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+
+            <!-- ============================================================ -->
+            <!-- HEATMAP SECTION -->
+            <!-- ============================================================ -->
+            <div id="section-heatmap" class="dashboard-section">
+                <div class="glass-card p-5 mb-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="font-semibold text-white text-sm">Room Trajectory Heatmap</h3>
+                        <div class="flex gap-2">
+                            <button onclick="loadHeatmap('entry_camera')" class="section-tab">Entry Cam</button>
+                            <button onclick="loadHeatmap('room_camera')" class="section-tab active" id="heatmap-room-btn">Room Cam</button>
+                            <button onclick="loadHeatmap('exit_camera')" class="section-tab">Exit Cam</button>
+                        </div>
+                    </div>
+                    <div class="flex justify-center">
+                        <canvas id="heatmapCanvas" width="800" height="500"></canvas>
+                    </div>
+                    <div class="flex items-center justify-center gap-6 mt-4 text-xs text-[#64748b]">
+                        <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-sm" style="background:#1e40af;"></span> Low Activity</span>
+                        <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-sm" style="background:#16a34a;"></span> Medium</span>
+                        <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-sm" style="background:#eab308;"></span> High</span>
+                        <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-sm" style="background:#dc2626;"></span> Very High</span>
+                    </div>
+                </div>
+            </div>
+
+
+            <!-- ============================================================ -->
+            <!-- CAMERAS SECTION -->
+            <!-- ============================================================ -->
+            <div id="section-cameras" class="dashboard-section">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+                    <!-- Entry Camera -->
+                    <div class="glass-card p-5">
+                        <div class="flex items-center gap-3 mb-4">
+                            <div class="w-10 h-10 rounded-xl bg-emerald-500/15 flex items-center justify-center text-emerald-400 text-lg">📹</div>
+                            <div>
+                                <h3 class="text-sm font-semibold text-white">Entry Camera</h3>
+                                <p class="text-xs text-[#64748b]">Gate Monitoring</p>
+                            </div>
+                            <span class="ml-auto live-dot"></span>
+                        </div>
+                        <div class="space-y-3" id="cam-entry-stats">
+                            <div class="flex justify-between text-xs"><span class="text-[#94a3b8]">Alerts</span><span class="text-white mono" id="cam-entry-alerts">--</span></div>
+                            <div class="flex justify-between text-xs"><span class="text-[#94a3b8]">Trajectory Points</span><span class="text-white mono" id="cam-entry-traj">--</span></div>
+                            <div class="flex justify-between text-xs"><span class="text-[#94a3b8]">Threats</span><span class="text-white mono" id="cam-entry-threats">--</span></div>
+                        </div>
+                    </div>
+                    <!-- Room Camera -->
+                    <div class="glass-card p-5">
+                        <div class="flex items-center gap-3 mb-4">
+                            <div class="w-10 h-10 rounded-xl bg-blue-500/15 flex items-center justify-center text-blue-400 text-lg">📹</div>
+                            <div>
+                                <h3 class="text-sm font-semibold text-white">Room Camera</h3>
+                                <p class="text-xs text-[#64748b]">Interior Tracking</p>
+                            </div>
+                            <span class="ml-auto live-dot"></span>
+                        </div>
+                        <div class="space-y-3">
+                            <div class="flex justify-between text-xs"><span class="text-[#94a3b8]">Alerts</span><span class="text-white mono" id="cam-room-alerts">--</span></div>
+                            <div class="flex justify-between text-xs"><span class="text-[#94a3b8]">Trajectory Points</span><span class="text-white mono" id="cam-room-traj">--</span></div>
+                            <div class="flex justify-between text-xs"><span class="text-[#94a3b8]">Threats</span><span class="text-white mono" id="cam-room-threats">--</span></div>
+                        </div>
+                    </div>
+                    <!-- Exit Camera -->
+                    <div class="glass-card p-5">
+                        <div class="flex items-center gap-3 mb-4">
+                            <div class="w-10 h-10 rounded-xl bg-red-500/15 flex items-center justify-center text-red-400 text-lg">📹</div>
+                            <div>
+                                <h3 class="text-sm font-semibold text-white">Exit Camera</h3>
+                                <p class="text-xs text-[#64748b]">Exit Gate</p>
+                            </div>
+                            <span class="ml-auto live-dot"></span>
+                        </div>
+                        <div class="space-y-3">
+                            <div class="flex justify-between text-xs"><span class="text-[#94a3b8]">Alerts</span><span class="text-white mono" id="cam-exit-alerts">--</span></div>
+                            <div class="flex justify-between text-xs"><span class="text-[#94a3b8]">Trajectory Points</span><span class="text-white mono" id="cam-exit-traj">--</span></div>
+                            <div class="flex justify-between text-xs"><span class="text-[#94a3b8]">Threats</span><span class="text-white mono" id="cam-exit-threats">--</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Camera comparison chart -->
+                <div class="glass-card p-5">
+                    <h3 class="font-semibold text-white text-sm mb-4">Camera Activity Comparison</h3>
+                    <div class="chart-container">
+                        <canvas id="chart-camera-comparison"></canvas>
+                    </div>
+                </div>
+            </div>
+
+
+            <!-- ============================================================ -->
+            <!-- LIVE FEED SECTION -->
+            <!-- ============================================================ -->
+            <div id="section-live" class="dashboard-section">
+                <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+                    <!-- Live Status -->
+                    <div class="glass-card p-5 xl:col-span-1">
+                        <div class="flex items-center gap-2 mb-4">
+                            <span class="live-dot"></span>
+                            <h3 class="font-semibold text-white text-sm">Live Status</h3>
+                        </div>
+                        <div class="text-center py-6">
+                            <div class="text-6xl font-black text-emerald-400 mono" id="live-inside-count">--</div>
+                            <div class="text-sm text-[#64748b] mt-2">People Inside Now</div>
+                        </div>
+                        <div class="text-center text-xs text-[#475569] mono" id="live-timestamp">--</div>
+                        <div class="mt-6 space-y-3" id="live-latest-entries">
+                            <h4 class="text-xs font-semibold text-[#64748b] uppercase tracking-wider">Latest Entries</h4>
+                        </div>
+                    </div>
+
+                    <!-- Live Alerts -->
+                    <div class="glass-card p-5 xl:col-span-2">
+                        <div class="flex items-center gap-2 mb-4">
+                            <span>🔔</span>
+                            <h3 class="font-semibold text-white text-sm">Live Alert Stream</h3>
+                            <span class="badge badge-info ml-auto">Auto-refresh: 5s</span>
+                        </div>
+                        <div class="space-y-2 overflow-y-auto" style="max-height: 65vh;" id="live-alerts-stream">
+                            <div class="text-center text-[#475569] text-sm py-8">Connecting...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div><!-- end .p-6 -->
+    </main>
+
+    <!-- Person Detail Slide Panel -->
+    <div class="detail-overlay" id="detail-overlay" onclick="closeDetailPanel()"></div>
+    <div class="detail-panel" id="detail-panel">
+        <div class="flex items-center justify-between mb-6">
+            <h3 class="text-lg font-bold text-white">Person Detail</h3>
+            <button onclick="closeDetailPanel()" class="w-8 h-8 rounded-lg bg-[#1a1f35] border border-[#2a3150] flex items-center justify-center text-[#94a3b8] hover:text-white transition">✕</button>
+        </div>
+        <div id="detail-content">
+            <div class="text-center text-[#475569] py-8">Select a person to view details</div>
+        </div>
+    </div>
+
+    <!-- ================================================================== -->
+    <!-- JAVASCRIPT -->
+    <!-- ================================================================== -->
+    {% raw %}
+    <script>
+        const API = '';  // Same origin
+        let chartInstances = {};
+        let currentPeopleState = '';
+        let peopleOffset = 0;
+        let alertsOffset = 0;
+        const PAGE_SIZE = 25;
+        let liveInterval = null;
+        let autoRefreshInterval = null;
+        let bridgeRunning = {{ 'true' if bridge_running else 'false' }};
+
+        // ---- Helpers ----
+        function fmt(n) { return n != null ? Number(n).toLocaleString() : '--'; }
+        function fmtTime(iso) {
+            if (!iso) return '--';
+            const d = new Date(iso);
+            if (isNaN(d)) return iso;
+            return d.toLocaleString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+        }
+        function fmtDuration(seconds) {
+            if (!seconds || seconds <= 0) return '--';
+            seconds = Math.round(seconds);
+            if (seconds < 60) return `${seconds}s`;
+            if (seconds < 3600) return `${Math.floor(seconds/60)}m ${seconds%60}s`;
+            return `${Math.floor(seconds/3600)}h ${Math.floor((seconds%3600)/60)}m`;
+        }
+        function threatColor(score) {
+            if (score >= 0.8) return '#ef4444';
+            if (score >= 0.6) return '#f97316';
+            if (score >= 0.3) return '#f59e0b';
+            return '#10b981';
+        }
+        function levelBadge(level) {
+            const cls = { info:'badge-info', warning:'badge-warning', critical:'badge-critical' };
+            const icon = { info:'ℹ️', warning:'⚠️', critical:'🚨' };
+            return `<span class="badge ${cls[level]||'badge-info'}">${icon[level]||''} ${level}</span>`;
+        }
+        function stateBadge(state) {
+            const labels = { inside_now:'Inside', exited:'Exited', unauthorized:'Unauthorized', waiting_to_enter:'Waiting' };
+            return `<span class="badge state-${state}">${labels[state]||state}</span>`;
+        }
+        async function fetchJSON(url) {
+            try {
+                const res = await fetch(API + url);
+                if (!res.ok) throw new Error(res.statusText);
+                return await res.json();
+            } catch(e) {
+                console.error('API Error:', url, e);
+                return null;
+            }
+        }
+        function destroyChart(id) {
+            if (chartInstances[id]) { chartInstances[id].destroy(); delete chartInstances[id]; }
+        }
+        function updateTimestamp() {
+            document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+        }
+
+        // ---- Chart defaults ----
+        Chart.defaults.color = '#94a3b8';
+        Chart.defaults.borderColor = 'rgba(42, 49, 80, 0.6)';
+        Chart.defaults.font.family = "'Inter', sans-serif";
+        Chart.defaults.font.size = 11;
+        Chart.defaults.plugins.legend.labels.usePointStyle = true;
+        Chart.defaults.plugins.legend.labels.pointStyleWidth = 10;
+        Chart.defaults.plugins.legend.labels.padding = 16;
+        Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(17, 24, 39, 0.95)';
+        Chart.defaults.plugins.tooltip.titleFont = { weight: '600' };
+        Chart.defaults.plugins.tooltip.padding = 12;
+        Chart.defaults.plugins.tooltip.cornerRadius = 8;
+        Chart.defaults.plugins.tooltip.borderColor = '#2a3150';
+        Chart.defaults.plugins.tooltip.borderWidth = 1;
+
+        // ---- Section Switching ----
+        function switchSection(section) {
+            document.querySelectorAll('.dashboard-section').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+            const sectionEl = document.getElementById('section-' + section);
+            if (sectionEl) sectionEl.classList.add('active');
+            const navEl = document.querySelector(`.nav-item[data-section="${section}"]`);
+            if (navEl) navEl.classList.add('active');
+            const titles = {
+                overview:'Overview', people:'People Tracking', alerts:'Alert Management',
+                threats:'Threat Analysis', velocity:'Velocity Analysis', heatmap:'Trajectory Heatmap',
+                cameras:'Camera Stats', live:'Live Feed'
+            };
+            document.getElementById('section-title').textContent = titles[section] || section;
+
+            // Load section data
+            if (section === 'people') loadPeople();
+            if (section === 'alerts') loadAlerts();
+            if (section === 'threats') loadThreats();
+            if (section === 'velocity') loadVelocity();
+            if (section === 'heatmap') loadHeatmap('room_camera');
+            if (section === 'cameras') loadCameras();
+            if (section === 'live') { loadLive(); startLiveUpdates(); }
+            else { stopLiveUpdates(); }
+        }
+
+        // ================================================================
+        // OVERVIEW
+        // ================================================================
+        async function updateBridgeBanner(overview) {
+            const banner = document.getElementById('bridge-banner');
+            const title = document.getElementById('banner-title');
+            const subtitle = document.getElementById('banner-subtitle');
+            const dot = document.getElementById('sidebar-dot');
+            const statusText = document.getElementById('sidebar-status-text');
+            if (!banner || !overview) return;
+
+            const running = overview.bridge_running;
+            bridgeRunning = running;
+            const mode = overview.bridge_mode || 'OFF';
+            const hasData = overview.has_data;
+
+            if (running) {
+                banner.className = banner.className.replace(/bg-amber-500\/8|border-amber-500\/20/g, '').replace(/bg-emerald-500\/5|border-emerald-500\/20/g, '') + ' bg-emerald-500/5 border-emerald-500/20';
+                title.className = title.className.replace('text-amber-300', 'text-emerald-300');
+                title.textContent = 'Cameras Active — Live Data Flowing';
+                subtitle.innerHTML = 'All analytics below reflect real-time camera detections (' + mode + ' mode)';
+                if(dot) { dot.classList.remove('off'); }
+                if(statusText) { statusText.textContent = 'Cameras Active (' + mode + ')'; }
+            } else {
+                banner.className = banner.className.replace(/bg-emerald-500\/5|border-emerald-500\/20/g, '').replace(/bg-amber-500\/8|border-amber-500\/20/g, '') + ' bg-amber-500/8 border-amber-500/20';
+                title.className = title.className.replace('text-emerald-300', 'text-amber-300');
+                title.textContent = hasData ? 'Cameras Offline — Showing Last Session Data' : 'Cameras Offline — No Data Being Collected';
+                subtitle.innerHTML = 'Start cameras from the <a href="/monitor" class="text-blue-400 hover:underline">Live Monitor</a> to begin collecting analytics data';
+                if(dot) { dot.classList.add('off'); }
+                if(statusText) { statusText.textContent = 'Cameras Off'; }
+            }
+        }
+
+        function showEmptyState(containerId, message) {
+            const el = document.getElementById(containerId);
+            if (el) {
+                el.innerHTML = '<div class="flex flex-col items-center justify-center py-12 text-center"><div class="text-3xl mb-3 opacity-40">📊</div><div class="text-sm text-[#475569]">' + message + '</div><div class="text-xs text-[#3a4256] mt-1">Data will appear here when cameras detect activity</div></div>';
+            }
+        }
+
+        async function loadOverview() {
+            const [overview, states, alertSum, threatSum, entryExit, duration] = await Promise.all([
+                fetchJSON('/api/overview'),
+                fetchJSON('/api/people/states'),
+                fetchJSON('/api/alerts/summary'),
+                fetchJSON('/api/threats/summary'),
+                fetchJSON('/api/entry-exit/timeline'),
+                fetchJSON('/api/entry-exit/duration'),
+            ]);
+
+            if (overview) {
+                // Update bridge status banner
+                updateBridgeBanner(overview);
+
+                // Update auto-refresh interval based on bridge status
+                const wasBridgeRunning = bridgeRunning;
+                bridgeRunning = overview.bridge_running;
+                if (wasBridgeRunning !== bridgeRunning) {
+                    startAutoRefresh();
+                }
+
+                document.getElementById('kpi-total-people').textContent = fmt(overview.total_people);
+                document.getElementById('kpi-inside').textContent = fmt(overview.currently_inside);
+                document.getElementById('kpi-entries').textContent = fmt(overview.total_entries);
+                document.getElementById('kpi-exits').textContent = fmt(overview.total_exits);
+                document.getElementById('kpi-unauthorized').textContent = fmt(overview.total_unauthorized);
+                document.getElementById('kpi-alerts').textContent = fmt(overview.total_alerts);
+                document.getElementById('kpi-threats').textContent = fmt(overview.total_threats);
+
+                // Show '--' for stats when there's no data yet
+                const hasData = overview.has_data;
+                document.getElementById('stat-avg-duration').textContent = hasData ? fmtDuration(overview.avg_duration_seconds) : '--';
+                document.getElementById('stat-avg-velocity').textContent = hasData ? overview.avg_velocity.toFixed(2) + ' m/s' : '--';
+                document.getElementById('stat-avg-threat').textContent = hasData ? overview.avg_threat_score.toFixed(3) : '--';
+                document.getElementById('stat-max-threat').textContent = hasData ? overview.max_threat_score.toFixed(3) : '--';
+                document.getElementById('stat-critical').textContent = fmt(overview.critical_alerts);
+
+                if (hasData) {
+                    const threatPct = Math.min(overview.avg_threat_score * 100, 100);
+                    document.getElementById('system-threat-bar').style.width = threatPct + '%';
+                    document.getElementById('system-threat-label').textContent = (threatPct < 30 ? 'LOW' : threatPct < 60 ? 'MODERATE' : 'HIGH') + ' (' + threatPct.toFixed(1) + '%)';
+                } else {
+                    document.getElementById('system-threat-bar').style.width = '0%';
+                    document.getElementById('system-threat-label').textContent = 'No data';
+                }
+            }
+
+            // Entry/Exit Timeline Chart
+            if (entryExit && entryExit.buckets && entryExit.buckets.length > 0) {
+                destroyChart('chart-entry-exit');
+                const labels = entryExit.buckets.map(b => {
+                    const d = new Date(b);
+                    return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' ' + d.getHours() + ':00';
+                });
+                // Show at most 48 latest buckets for readability
+                const maxBars = 48;
+                const start = Math.max(0, labels.length - maxBars);
+                chartInstances['chart-entry-exit'] = new Chart(document.getElementById('chart-entry-exit'), {
+                    type: 'bar',
+                    data: {
+                        labels: labels.slice(start),
+                        datasets: [
+                            { label: 'Entries', data: entryExit.entries.slice(start), backgroundColor: 'rgba(16, 185, 129, 0.7)', borderRadius: 4 },
+                            { label: 'Exits', data: entryExit.exits.slice(start), backgroundColor: 'rgba(59, 130, 246, 0.7)', borderRadius: 4 },
+                        ]
+                    },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        plugins: { legend: { position: 'top' } },
+                        scales: {
+                            x: { ticks: { maxRotation: 45, maxTicksLimit: 16 } },
+                            y: { beginAtZero: true, ticks: { stepSize: 1 } }
+                        }
+                    }
+                });
+            }
+
+            // Alerts Timeline Chart
+            const alertsTL = await fetchJSON('/api/alerts/timeline');
+            if (alertsTL && alertsTL.buckets && alertsTL.buckets.length > 0) {
+                destroyChart('chart-alerts-timeline');
+                const maxBars = 48;
+                const buckets = alertsTL.buckets.slice(-maxBars);
+                const infoData = buckets.map(b => (alertsTL.data[b] && alertsTL.data[b].info) || 0);
+                const warnData = buckets.map(b => (alertsTL.data[b] && alertsTL.data[b].warning) || 0);
+                const critData = buckets.map(b => (alertsTL.data[b] && alertsTL.data[b].critical) || 0);
+                const tlLabels = buckets.map(b => {
+                    const d = new Date(b);
+                    return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' ' + d.getHours() + ':00';
+                });
+                chartInstances['chart-alerts-timeline'] = new Chart(document.getElementById('chart-alerts-timeline'), {
+                    type: 'bar',
+                    data: {
+                        labels: tlLabels,
+                        datasets: [
+                            { label: 'Info', data: infoData, backgroundColor: 'rgba(59, 130, 246, 0.6)', borderRadius: 3 },
+                            { label: 'Warning', data: warnData, backgroundColor: 'rgba(245, 158, 11, 0.6)', borderRadius: 3 },
+                            { label: 'Critical', data: critData, backgroundColor: 'rgba(239, 68, 68, 0.6)', borderRadius: 3 },
+                        ]
+                    },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        plugins: { legend: { position: 'top' } },
+                        scales: {
+                            x: { stacked: true, ticks: { maxRotation: 45, maxTicksLimit: 16 } },
+                            y: { stacked: true, beginAtZero: true, ticks: { stepSize: 1 } }
+                        }
+                    }
+                });
+            }
+
+            // People States Doughnut
+            if (states) {
+                destroyChart('chart-people-states');
+                const stLabels = Object.keys(states);
+                if (stLabels.length === 0) {
+                    const c = document.getElementById('chart-people-states');
+                    if (c && c.parentNode) c.parentNode.innerHTML = '<div class="flex flex-col items-center justify-center h-full py-8 text-center"><div class="text-2xl mb-2 opacity-30">👥</div><div class="text-xs text-[#475569]">No people data yet</div></div>';
+                } else {
+                    const stColors = stLabels.map(s => ({
+                        inside_now:'#10b981', exited:'#6366f1', unauthorized:'#ef4444', waiting_to_enter:'#f59e0b'
+                    }[s] || '#64748b'));
+                    chartInstances['chart-people-states'] = new Chart(document.getElementById('chart-people-states'), {
+                        type: 'doughnut',
+                        data: {
+                            labels: stLabels.map(s => s.replace(/_/g,' ')),
+                            datasets: [{ data: Object.values(states), backgroundColor: stColors, borderWidth: 0, hoverOffset: 8 }]
+                        },
+                        options: { responsive: true, maintainAspectRatio: false, cutout: '65%', plugins: { legend: { position: 'bottom' } } }
+                    });
+                }
+            }
+
+            // Alert Types Doughnut
+            if (alertSum) {
+                destroyChart('chart-alert-types');
+                const atLabels = Object.keys(alertSum.by_type || {});
+                if (atLabels.length === 0) {
+                    const c = document.getElementById('chart-alert-types');
+                    if (c && c.parentNode) c.parentNode.innerHTML = '<div class="flex flex-col items-center justify-center h-full py-8 text-center"><div class="text-2xl mb-2 opacity-30">🔔</div><div class="text-xs text-[#475569]">No alerts yet</div></div>';
+                } else {
+                    const atColors = ['#3b82f6','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#ec4899'];
+                    chartInstances['chart-alert-types'] = new Chart(document.getElementById('chart-alert-types'), {
+                        type: 'doughnut',
+                        data: {
+                            labels: atLabels.map(s => s.replace(/_/g,' ')),
+                            datasets: [{ data: Object.values(alertSum.by_type), backgroundColor: atColors.slice(0, atLabels.length), borderWidth: 0, hoverOffset: 8 }]
+                        },
+                        options: { responsive: true, maintainAspectRatio: false, cutout: '65%', plugins: { legend: { position: 'bottom' } } }
+                    });
+                }
+            }
+
+            // Threat Distribution Doughnut
+            if (threatSum && threatSum.score_distribution) {
+                destroyChart('chart-threat-dist');
+                const sdLabels = Object.keys(threatSum.score_distribution);
+                if (sdLabels.length === 0) {
+                    const c = document.getElementById('chart-threat-dist');
+                    if (c && c.parentNode) c.parentNode.innerHTML = '<div class="flex flex-col items-center justify-center h-full py-8 text-center"><div class="text-2xl mb-2 opacity-30">⚠️</div><div class="text-xs text-[#475569]">No threats detected</div></div>';
+                } else {
+                    const sdColors = { low:'#10b981', medium:'#f59e0b', high:'#f97316', critical:'#ef4444' };
+                    chartInstances['chart-threat-dist'] = new Chart(document.getElementById('chart-threat-dist'), {
+                        type: 'doughnut',
+                        data: {
+                            labels: sdLabels.map(s => s.charAt(0).toUpperCase() + s.slice(1)),
+                            datasets: [{ data: sdLabels.map(k => threatSum.score_distribution[k]), backgroundColor: sdLabels.map(k => sdColors[k]||'#64748b'), borderWidth: 0, hoverOffset: 8 }]
+                        },
+                        options: { responsive: true, maintainAspectRatio: false, cutout: '65%', plugins: { legend: { position: 'bottom' } } }
+                    });
+                }
+            } else {
+                destroyChart('chart-threat-dist');
+                const c = document.getElementById('chart-threat-dist');
+                if (c && c.parentNode) c.parentNode.innerHTML = '<div class="flex flex-col items-center justify-center h-full py-8 text-center"><div class="text-2xl mb-2 opacity-30">⚠️</div><div class="text-xs text-[#475569]">No threats detected</div></div>';
+            }
+
+            // Duration Distribution Bar
+            if (duration && duration.distribution && duration.distribution.length > 0) {
+                destroyChart('chart-duration-dist');
+                chartInstances['chart-duration-dist'] = new Chart(document.getElementById('chart-duration-dist'), {
+                    type: 'bar',
+                    data: {
+                        labels: duration.distribution.map(d => d.bucket),
+                        datasets: [{
+                            label: 'Number of Visitors',
+                            data: duration.distribution.map(d => d.count),
+                            backgroundColor: ['#06b6d4','#3b82f6','#8b5cf6','#f59e0b','#ef4444'],
+                            borderRadius: 6
+                        }]
+                    },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } }
+                    }
+                });
+            } else {
+                destroyChart('chart-duration-dist');
+                const c = document.getElementById('chart-duration-dist');
+                if (c && c.parentNode) c.parentNode.innerHTML = '<div class="flex flex-col items-center justify-center h-full py-8 text-center"><div class="text-2xl mb-2 opacity-30">⏱️</div><div class="text-xs text-[#475569]">No visit duration data yet</div></div>';
+            }
+
+            // Recent Alerts
+            const latestAlerts = await fetchJSON('/api/alerts?limit=8');
+            if (latestAlerts) {
+                const container = document.getElementById('recent-alerts-list');
+                if (!latestAlerts.alerts || latestAlerts.alerts.length === 0) {
+                    container.innerHTML = '<div class="flex flex-col items-center justify-center py-10 text-center"><div class="text-2xl mb-2 opacity-30">🔔</div><div class="text-sm text-[#475569]">No alerts yet</div><div class="text-xs text-[#3a4256] mt-1">Alerts will appear here when cameras detect events</div></div>';
+                } else {
+                    container.innerHTML = latestAlerts.alerts.map(a => `
+                        <div class="flex items-start gap-3 p-3 rounded-lg hover:bg-[rgba(59,130,246,0.05)] transition">
+                            <div class="mt-0.5">${{info:'🔵',warning:'🟡',critical:'🔴'}[a.alert_level]||'⚪'}</div>
+                            <div class="flex-1 min-w-0">
+                                <div class="flex items-center gap-2">
+                                    ${levelBadge(a.alert_level)}
+                                    <span class="text-xs text-[#475569] mono">${fmtTime(a.timestamp)}</span>
+                                </div>
+                                <div class="text-sm text-[#94a3b8] mt-1 truncate">${a.message || a.alert_type}</div>
+                                <div class="text-xs text-[#475569] mt-0.5">${a.camera_source || ''} ${a.person_id ? '· ' + a.person_id : ''}</div>
+                            </div>
+                        </div>
+                    `).join('');
+                }
+            }
+
+            updateTimestamp();
+        }
+
+        // ================================================================
+        // PEOPLE
+        // ================================================================
+        async function loadPeople() {
+            const sort = document.getElementById('people-sort').value;
+            const data = await fetchJSON(`/api/people?state=${currentPeopleState}&sort=${sort}&limit=${PAGE_SIZE}&offset=${peopleOffset}`);
+            if (!data) return;
+
+            document.getElementById('people-count').textContent = `${data.total} people`;
+            document.getElementById('people-page-info').textContent = `Page ${Math.floor(peopleOffset/PAGE_SIZE)+1} of ${Math.max(1, Math.ceil(data.total/PAGE_SIZE))}`;
+
+            const tbody = document.getElementById('people-tbody');
+            if (!data.people || data.people.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" class="text-center text-[#475569] py-12"><div class="flex flex-col items-center"><div class="text-2xl mb-2 opacity-30">👥</div><div class="text-sm">No people detected yet</div><div class="text-xs text-[#3a4256] mt-1">People will appear here when cameras detect entries</div></div></td></tr>';
+                return;
+            }
+            tbody.innerHTML = data.people.map(p => `
+                <tr>
+                    <td><span class="font-medium text-white mono text-xs">${p.person_id}</span></td>
+                    <td>${stateBadge(p.state)}</td>
+                    <td class="mono text-xs">${fmtTime(p.entry_time)}</td>
+                    <td class="mono text-xs">${fmtDuration(p.duration_seconds)}</td>
+                    <td class="mono text-xs">${p.avg_velocity ? p.avg_velocity.toFixed(2) + ' m/s' : '--'}</td>
+                    <td class="mono text-xs">${p.max_velocity ? p.max_velocity.toFixed(2) + ' m/s' : '--'}</td>
+                    <td>
+                        <div class="flex items-center gap-2">
+                            <div class="threat-bar w-16"><div class="threat-bar-fill" style="width:${Math.min(p.threat_score*100,100)}%;background:${threatColor(p.threat_score)};"></div></div>
+                            <span class="mono text-xs" style="color:${threatColor(p.threat_score)}">${p.threat_score ? p.threat_score.toFixed(3) : '0'}</span>
+                        </div>
+                    </td>
+                    <td class="mono text-xs">${p.alert_count || 0}</td>
+                    <td><button onclick="openPersonDetail('${p.person_id}')" class="text-xs text-blue-400 hover:text-blue-300 font-medium">Details →</button></td>
+                </tr>
+            `).join('');
+        }
+
+        function filterPeople(btn, state) {
+            document.querySelectorAll('#section-people .section-tab').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentPeopleState = state;
+            peopleOffset = 0;
+            loadPeople();
+        }
+        function peopleNextPage() { peopleOffset += PAGE_SIZE; loadPeople(); }
+        function peoplePrevPage() { peopleOffset = Math.max(0, peopleOffset - PAGE_SIZE); loadPeople(); }
+
+        // ================================================================
+        // PERSON DETAIL PANEL
+        // ================================================================
+        async function openPersonDetail(personId) {
+            document.getElementById('detail-panel').classList.add('open');
+            document.getElementById('detail-overlay').classList.add('open');
+            document.getElementById('detail-content').innerHTML = '<div class="text-center text-[#475569] py-8">Loading...</div>';
+
+            const data = await fetchJSON(`/api/people/${personId}`);
+            if (!data || data.error) {
+                document.getElementById('detail-content').innerHTML = `<div class="text-center text-red-400 py-8">${data?.error || 'Failed to load'}</div>`;
+                return;
+            }
+            const p = data.person;
+            const numTraj = data.trajectory.length;
+            const numAlerts = data.alerts.length;
+            const numThreats = data.threat_events.length;
+
+            let html = `
+                <div class="mb-6">
+                    <div class="flex items-center gap-3 mb-3">
+                        <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500/20 to-purple-500/20 border border-[#2a3150] flex items-center justify-center text-xl">👤</div>
+                        <div>
+                            <div class="font-bold text-white mono text-sm">${p.person_id}</div>
+                            ${stateBadge(p.state)}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3 mb-6">
+                    <div class="bg-[#111827] rounded-xl p-3 border border-[#2a3150]">
+                        <div class="text-[10px] text-[#64748b] uppercase tracking-wider">Entry Time</div>
+                        <div class="text-sm text-white mono mt-1">${fmtTime(p.entry_time)}</div>
+                    </div>
+                    <div class="bg-[#111827] rounded-xl p-3 border border-[#2a3150]">
+                        <div class="text-[10px] text-[#64748b] uppercase tracking-wider">Exit Time</div>
+                        <div class="text-sm text-white mono mt-1">${fmtTime(p.exit_time)}</div>
+                    </div>
+                    <div class="bg-[#111827] rounded-xl p-3 border border-[#2a3150]">
+                        <div class="text-[10px] text-[#64748b] uppercase tracking-wider">Duration</div>
+                        <div class="text-sm text-white mono mt-1">${fmtDuration(p.duration_seconds)}</div>
+                    </div>
+                    <div class="bg-[#111827] rounded-xl p-3 border border-[#2a3150]">
+                        <div class="text-[10px] text-[#64748b] uppercase tracking-wider">Threat Score</div>
+                        <div class="text-sm mono mt-1" style="color:${threatColor(p.threat_score)}">${p.threat_score ? p.threat_score.toFixed(3) : '0.000'}</div>
+                    </div>
+                    <div class="bg-[#111827] rounded-xl p-3 border border-[#2a3150]">
+                        <div class="text-[10px] text-[#64748b] uppercase tracking-wider">Avg Velocity</div>
+                        <div class="text-sm text-white mono mt-1">${p.avg_velocity ? p.avg_velocity.toFixed(2) : '0'} m/s</div>
+                    </div>
+                    <div class="bg-[#111827] rounded-xl p-3 border border-[#2a3150]">
+                        <div class="text-[10px] text-[#64748b] uppercase tracking-wider">Max Velocity</div>
+                        <div class="text-sm text-white mono mt-1">${p.max_velocity ? p.max_velocity.toFixed(2) : '0'} m/s</div>
+                    </div>
+                </div>
+
+                <div class="flex gap-3 mb-6">
+                    <div class="flex-1 text-center bg-[#111827] rounded-xl p-3 border border-[#2a3150]">
+                        <div class="text-lg font-bold text-blue-400">${numTraj}</div>
+                        <div class="text-[10px] text-[#64748b]">Trajectory Pts</div>
+                    </div>
+                    <div class="flex-1 text-center bg-[#111827] rounded-xl p-3 border border-[#2a3150]">
+                        <div class="text-lg font-bold text-amber-400">${numAlerts}</div>
+                        <div class="text-[10px] text-[#64748b]">Alerts</div>
+                    </div>
+                    <div class="flex-1 text-center bg-[#111827] rounded-xl p-3 border border-[#2a3150]">
+                        <div class="text-lg font-bold text-red-400">${numThreats}</div>
+                        <div class="text-[10px] text-[#64748b]">Threats</div>
+                    </div>
+                </div>
+            `;
+
+            // Trajectory mini-chart
+            if (numTraj > 1) {
+                html += `
+                    <div class="mb-6">
+                        <h4 class="text-xs font-semibold text-[#64748b] uppercase tracking-wider mb-3">Trajectory Path</h4>
+                        <canvas id="detail-trajectory-chart" height="200"></canvas>
+                    </div>
+                `;
+            }
+
+            // Person alerts
+            if (numAlerts > 0) {
+                html += `<h4 class="text-xs font-semibold text-[#64748b] uppercase tracking-wider mb-3">Alerts</h4>`;
+                html += data.alerts.slice(0, 10).map(a => `
+                    <div class="flex items-start gap-2 mb-2 text-xs">
+                        ${levelBadge(a.alert_level)}
+                        <span class="text-[#94a3b8] flex-1">${a.message || a.alert_type}</span>
+                        <span class="text-[#475569] mono">${fmtTime(a.timestamp)}</span>
+                    </div>
+                `).join('');
+            }
+
+            // Threat events
+            if (numThreats > 0) {
+                html += `<h4 class="text-xs font-semibold text-[#64748b] uppercase tracking-wider mb-3 mt-4">Threat Events</h4>`;
+                html += data.threat_events.slice(0, 10).map(t => `
+                    <div class="flex items-center gap-2 mb-2 text-xs">
+                        <span class="badge badge-critical">${t.event_type}</span>
+                        <span class="mono" style="color:${threatColor(t.threat_score)}">${t.threat_score.toFixed(3)}</span>
+                        <span class="text-[#475569] ml-auto mono">${fmtTime(t.timestamp)}</span>
+                    </div>
+                `).join('');
+            }
+
+            document.getElementById('detail-content').innerHTML = html;
+
+            // Render trajectory chart
+            if (numTraj > 1) {
+                const sample = data.trajectory.filter((_, i) => i % Math.max(1, Math.floor(numTraj / 100)) === 0);
+                new Chart(document.getElementById('detail-trajectory-chart'), {
+                    type: 'scatter',
+                    data: {
+                        datasets: [{
+                            label: 'Path',
+                            data: sample.map(t => ({x: t.x, y: t.y})),
+                            backgroundColor: 'rgba(59,130,246,0.6)',
+                            borderColor: 'rgba(59,130,246,0.3)',
+                            pointRadius: 2,
+                            showLine: true,
+                            borderWidth: 1.5,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            x: { title: { display: true, text: 'X' } },
+                            y: { title: { display: true, text: 'Y' }, reverse: true }
+                        }
+                    }
+                });
+            }
+        }
+
+        function closeDetailPanel() {
+            document.getElementById('detail-panel').classList.remove('open');
+            document.getElementById('detail-overlay').classList.remove('open');
+        }
+
+        // ================================================================
+        // ALERTS
+        // ================================================================
+        let currentAlertLevel = '';
+        async function loadAlerts() {
+            const [summary, data] = await Promise.all([
+                fetchJSON('/api/alerts/summary'),
+                fetchJSON(`/api/alerts?level=${currentAlertLevel}&limit=${PAGE_SIZE}&offset=${alertsOffset}`)
+            ]);
+
+            if (summary) {
+                document.getElementById('alert-total').textContent = fmt(Object.values(summary.by_level).reduce((a,b)=>a+b,0));
+                document.getElementById('alert-info-count').textContent = fmt(summary.by_level.info || 0);
+                document.getElementById('alert-warn-count').textContent = fmt(summary.by_level.warning || 0);
+                document.getElementById('alert-crit-count').textContent = fmt(summary.by_level.critical || 0);
+
+                // By type chart
+                destroyChart('chart-alerts-by-type');
+                const atLabels = Object.keys(summary.by_type);
+                const atColors = ['#3b82f6','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#ec4899'];
+                chartInstances['chart-alerts-by-type'] = new Chart(document.getElementById('chart-alerts-by-type'), {
+                    type: 'polarArea',
+                    data: {
+                        labels: atLabels.map(s => s.replace(/_/g,' ')),
+                        datasets: [{ data: Object.values(summary.by_type), backgroundColor: atColors.slice(0, atLabels.length).map(c => c + 'aa'), borderWidth: 0 }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position:'bottom' } } }
+                });
+
+                // By camera chart
+                destroyChart('chart-alerts-by-camera');
+                const camLabels = Object.keys(summary.by_camera);
+                const camColors = ['#10b981','#3b82f6','#ef4444'];
+                chartInstances['chart-alerts-by-camera'] = new Chart(document.getElementById('chart-alerts-by-camera'), {
+                    type: 'bar',
+                    data: {
+                        labels: camLabels.map(s => s.replace(/_/g,' ')),
+                        datasets: [{ label: 'Alerts', data: Object.values(summary.by_camera), backgroundColor: camColors.slice(0, camLabels.length), borderRadius: 8 }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } } }
+                });
+            }
+
+            if (data) {
+                document.getElementById('alerts-count').textContent = `${data.total} alerts`;
+                document.getElementById('alerts-page-info').textContent = `Page ${Math.floor(alertsOffset/PAGE_SIZE)+1} of ${Math.max(1,Math.ceil(data.total/PAGE_SIZE))}`;
+
+                const tbody = document.getElementById('alerts-tbody');
+                if (!data.alerts || data.alerts.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-[#475569] py-12"><div class="flex flex-col items-center"><div class="text-2xl mb-2 opacity-30">🔔</div><div class="text-sm">No alerts detected yet</div><div class="text-xs text-[#3a4256] mt-1">Alerts will appear here when cameras detect security events</div></div></td></tr>';
+                    return;
+                }
+                tbody.innerHTML = data.alerts.map(a => `
+                    <tr>
+                        <td class="mono text-xs">${fmtTime(a.timestamp)}</td>
+                        <td>${levelBadge(a.alert_level)}</td>
+                        <td><span class="badge badge-purple">${(a.alert_type||'').replace(/_/g,' ')}</span></td>
+                        <td class="mono text-xs">${a.person_id || '--'}</td>
+                        <td class="text-xs">${(a.camera_source||'').replace(/_/g,' ')}</td>
+                        <td class="text-xs max-w-xs truncate">${a.message || '--'}</td>
+                    </tr>
+                `).join('');
+            }
+        }
+
+        function filterAlerts(btn, level) {
+            document.querySelectorAll('#section-alerts .section-tab').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentAlertLevel = level;
+            alertsOffset = 0;
+            loadAlerts();
+        }
+        function alertsNextPage() { alertsOffset += PAGE_SIZE; loadAlerts(); }
+        function alertsPrevPage() { alertsOffset = Math.max(0, alertsOffset - PAGE_SIZE); loadAlerts(); }
+
+        // ================================================================
+        // THREATS
+        // ================================================================
+        async function loadThreats() {
+            const [summary, timeline, data] = await Promise.all([
+                fetchJSON('/api/threats/summary'),
+                fetchJSON('/api/threats/timeline'),
+                fetchJSON('/api/threats?limit=50')
+            ]);
+
+            // Timeline chart
+            if (timeline && timeline.buckets.length > 0) {
+                destroyChart('chart-threats-timeline');
+                const maxBars = 48;
+                const start = Math.max(0, timeline.buckets.length - maxBars);
+                const labels = timeline.buckets.slice(start).map(b => {
+                    const d = new Date(b);
+                    return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' ' + d.getHours()+':00';
+                });
+                chartInstances['chart-threats-timeline'] = new Chart(document.getElementById('chart-threats-timeline'), {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            { label: 'Event Count', data: timeline.counts.slice(start), borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', fill: true, tension: 0.3, pointRadius: 2 },
+                            { label: 'Avg Score', data: timeline.avg_scores.slice(start), borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', fill: true, tension: 0.3, pointRadius: 2, yAxisID: 'y1' },
+                        ]
+                    },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        plugins: { legend: { position: 'top' } },
+                        scales: {
+                            x: { ticks: { maxRotation: 45, maxTicksLimit: 16 } },
+                            y: { beginAtZero: true, position:'left', title: { display: true, text: 'Count' } },
+                            y1: { beginAtZero: true, position:'right', max: 1, title: { display: true, text: 'Score' }, grid: { drawOnChartArea: false } }
+                        }
+                    }
+                });
+            }
+
+            // By type bar chart
+            if (summary && summary.by_type.length > 0) {
+                destroyChart('chart-threats-by-type');
+                const colors = ['#ef4444','#f97316','#f59e0b','#8b5cf6','#06b6d4'];
+                chartInstances['chart-threats-by-type'] = new Chart(document.getElementById('chart-threats-by-type'), {
+                    type: 'bar',
+                    data: {
+                        labels: summary.by_type.map(t => t.event_type.replace(/_/g,' ')),
+                        datasets: [
+                            { label: 'Count', data: summary.by_type.map(t => t.count), backgroundColor: colors.slice(0, summary.by_type.length), borderRadius: 6 },
+                        ]
+                    },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        indexAxis: 'y',
+                        plugins: { legend: { display: false } },
+                        scales: { x: { beginAtZero: true, ticks: { stepSize: 1 } } }
+                    }
+                });
+
+                // Detailed score histogram (treat as scatter-like bar)
+                destroyChart('chart-threats-score-detail');
+                const scoreBuckets = ['0.0-0.1','0.1-0.2','0.2-0.3','0.3-0.4','0.4-0.5','0.5-0.6','0.6-0.7','0.7-0.8','0.8-0.9','0.9-1.0'];
+                // We'll build this from the raw data
+                if (data && data.threats.length > 0) {
+                    const counts = new Array(10).fill(0);
+                    data.threats.forEach(t => {
+                        const idx = Math.min(9, Math.floor(t.threat_score * 10));
+                        counts[idx]++;
+                    });
+                    const barColors = counts.map((_, i) => {
+                        if (i < 3) return '#10b981';
+                        if (i < 6) return '#f59e0b';
+                        if (i < 8) return '#f97316';
+                        return '#ef4444';
+                    });
+                    chartInstances['chart-threats-score-detail'] = new Chart(document.getElementById('chart-threats-score-detail'), {
+                        type: 'bar',
+                        data: {
+                            labels: scoreBuckets,
+                            datasets: [{ label: 'Events', data: counts, backgroundColor: barColors, borderRadius: 4 }]
+                        },
+                        options: {
+                            responsive: true, maintainAspectRatio: false,
+                            plugins: { legend: { display: false } },
+                            scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } }, x: { title: { display: true, text: 'Threat Score Range' } } }
+                        }
+                    });
+                }
+            }
+
+            // Table
+            if (data) {
+                const tbody = document.getElementById('threats-tbody');
+                if (!data.threats || data.threats.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="text-center text-[#475569] py-12"><div class="flex flex-col items-center"><div class="text-2xl mb-2 opacity-30">⚠️</div><div class="text-sm">No threat events detected yet</div><div class="text-xs text-[#3a4256] mt-1">Threats will appear here when cameras detect suspicious activity</div></div></td></tr>';
+                    return;
+                }
+                tbody.innerHTML = data.threats.map(t => `
+                    <tr>
+                        <td class="mono text-xs">${fmtTime(t.timestamp)}</td>
+                        <td class="mono text-xs">${t.person_id}</td>
+                        <td><span class="badge badge-critical">${t.event_type.replace(/_/g,' ')}</span></td>
+                        <td>
+                            <div class="flex items-center gap-2">
+                                <div class="threat-bar w-12"><div class="threat-bar-fill" style="width:${Math.min(t.threat_score*100,100)}%;background:${threatColor(t.threat_score)};"></div></div>
+                                <span class="mono text-xs" style="color:${threatColor(t.threat_score)}">${t.threat_score.toFixed(3)}</span>
+                            </div>
+                        </td>
+                        <td class="mono text-xs">${t.velocity.toFixed(2)} m/s</td>
+                        <td class="mono text-xs">${t.trajectory_entropy.toFixed(3)}</td>
+                        <td class="mono text-xs">${t.proximity_density.toFixed(3)}</td>
+                        <td class="text-xs">${(t.camera_source||'').replace(/_/g,' ')}</td>
+                    </tr>
+                `).join('');
+            }
+        }
+
+        // ================================================================
+        // VELOCITY
+        // ================================================================
+        async function loadVelocity() {
+            const [dist, top, people] = await Promise.all([
+                fetchJSON('/api/velocity/distribution'),
+                fetchJSON('/api/velocity/top?limit=15'),
+                fetchJSON('/api/people?sort=max_velocity&limit=100')
+            ]);
+
+            // Distribution chart
+            if (dist && dist.distribution.length > 0) {
+                destroyChart('chart-velocity-dist');
+                const colors = ['#10b981','#3b82f6','#f59e0b','#ef4444'];
+                chartInstances['chart-velocity-dist'] = new Chart(document.getElementById('chart-velocity-dist'), {
+                    type: 'bar',
+                    data: {
+                        labels: dist.distribution.map(d => d.category),
+                        datasets: [{ label: 'People', data: dist.distribution.map(d => d.count), backgroundColor: colors, borderRadius: 8 }]
+                    },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } }
+                    }
+                });
+            }
+
+            // Velocity vs Threat scatter
+            if (people && people.people.length > 0) {
+                destroyChart('chart-velocity-threat');
+                const scatterData = people.people.filter(p => p.avg_velocity > 0).map(p => ({
+                    x: p.avg_velocity,
+                    y: p.threat_score || 0,
+                    label: p.person_id
+                }));
+                chartInstances['chart-velocity-threat'] = new Chart(document.getElementById('chart-velocity-threat'), {
+                    type: 'scatter',
+                    data: {
+                        datasets: [{
+                            label: 'People',
+                            data: scatterData,
+                            backgroundColor: scatterData.map(d => threatColor(d.y) + 'cc'),
+                            pointRadius: 5,
+                            pointHoverRadius: 8
+                        }]
+                    },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                callbacks: {
+                                    label: ctx => `${ctx.raw.label}: vel=${ctx.raw.x.toFixed(2)} threat=${ctx.raw.y.toFixed(3)}`
+                                }
+                            }
+                        },
+                        scales: {
+                            x: { title: { display: true, text: 'Avg Velocity (m/s)' } },
+                            y: { title: { display: true, text: 'Threat Score' }, min: 0, max: 1 }
+                        }
+                    }
+                });
+            }
+
+            // Top velocities table
+            if (top) {
+                const tbody = document.getElementById('velocity-top-tbody');
+                tbody.innerHTML = top.top_velocities.map((p, i) => `
+                    <tr>
+                        <td class="text-xs text-[#64748b]">${i+1}</td>
+                        <td><span class="font-medium text-white mono text-xs cursor-pointer hover:text-blue-400" onclick="openPersonDetail('${p.person_id}')">${p.person_id}</span></td>
+                        <td class="mono text-xs">${p.avg_velocity ? p.avg_velocity.toFixed(2) : '0'} m/s</td>
+                        <td class="mono text-xs font-semibold" style="color:${p.max_velocity > 4 ? '#ef4444' : '#10b981'}">${p.max_velocity ? p.max_velocity.toFixed(2) : '0'} m/s</td>
+                        <td>
+                            <div class="flex items-center gap-2">
+                                <div class="threat-bar w-12"><div class="threat-bar-fill" style="width:${Math.min((p.threat_score||0)*100,100)}%;background:${threatColor(p.threat_score||0)};"></div></div>
+                                <span class="mono text-xs">${(p.threat_score||0).toFixed(3)}</span>
+                            </div>
+                        </td>
+                        <td>${stateBadge(p.state)}</td>
+                    </tr>
+                `).join('');
+            }
+        }
+
+        // ================================================================
+        // HEATMAP
+        // ================================================================
+        async function loadHeatmap(camera) {
+            // Update active button
+            document.querySelectorAll('#section-heatmap .section-tab').forEach(b => b.classList.remove('active'));
+            const btn = document.querySelector(`#section-heatmap .section-tab[onclick*="${camera}"]`) || document.getElementById('heatmap-room-btn');
+            if (btn) btn.classList.add('active');
+
+            const data = await fetchJSON(`/api/trajectories/heatmap?camera=${camera}`);
+            if (!data || data.points.length === 0) return;
+
+            const canvas = document.getElementById('heatmapCanvas');
+            const ctx = canvas.getContext('2d');
+            const W = canvas.width;
+            const H = canvas.height;
+
+            ctx.clearRect(0, 0, W, H);
+
+            // Normalize coordinates
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            data.points.forEach(p => {
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.y < minY) minY = p.y;
+                if (p.y > maxY) maxY = p.y;
+            });
+            const rangeX = maxX - minX || 1;
+            const rangeY = maxY - minY || 1;
+            const pad = 40;
+
+            // Grid-based density
+            const gridW = 40, gridH = 25;
+            const grid = Array.from({length: gridH}, () => new Array(gridW).fill(0));
+
+            data.points.forEach(p => {
+                const gx = Math.min(gridW - 1, Math.floor(((p.x - minX) / rangeX) * (gridW - 1)));
+                const gy = Math.min(gridH - 1, Math.floor(((p.y - minY) / rangeY) * (gridH - 1)));
+                grid[gy][gx]++;
+            });
+
+            let maxDensity = 0;
+            grid.forEach(row => row.forEach(v => { if (v > maxDensity) maxDensity = v; }));
+
+            const cellW = (W - pad*2) / gridW;
+            const cellH = (H - pad*2) / gridH;
+
+            for (let gy = 0; gy < gridH; gy++) {
+                for (let gx = 0; gx < gridW; gx++) {
+                    const val = grid[gy][gx] / (maxDensity || 1);
+                    if (val < 0.01) continue;
+
+                    let r, g, b;
+                    if (val < 0.25) { r = 30; g = 64; b = 175; }
+                    else if (val < 0.5) { r = 22; g = 163; b = 74; }
+                    else if (val < 0.75) { r = 234; g = 179; b = 8; }
+                    else { r = 220; g = 38; b = 38; }
+
+                    ctx.fillStyle = `rgba(${r},${g},${b},${Math.min(0.85, val + 0.15)})`;
+                    ctx.beginPath();
+                    ctx.roundRect(pad + gx * cellW, pad + gy * cellH, cellW - 1, cellH - 1, 3);
+                    ctx.fill();
+                }
+            }
+
+            // Draw grid border
+            ctx.strokeStyle = '#2a3150';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(pad, pad, W - pad*2, H - pad*2);
+
+            // Title
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '12px Inter, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(camera.replace(/_/g, ' ').toUpperCase() + ` — ${data.points.length} points`, W/2, 24);
+        }
+
+        // ================================================================
+        // CAMERAS
+        // ================================================================
+        async function loadCameras() {
+            const data = await fetchJSON('/api/cameras/stats');
+            if (!data) return;
+
+            const cams = ['entry_camera','room_camera','exit_camera'];
+            const prefixes = ['entry','room','exit'];
+
+            prefixes.forEach((prefix, i) => {
+                const cam = cams[i];
+                document.getElementById(`cam-${prefix}-alerts`).textContent = fmt(data.alerts_by_camera[cam] || 0);
+                document.getElementById(`cam-${prefix}-traj`).textContent = fmt(data.trajectory_points_by_camera[cam] || 0);
+                const threatCam = data.threats_by_camera.find(t => t.camera_source === cam);
+                document.getElementById(`cam-${prefix}-threats`).textContent = fmt(threatCam ? threatCam.count : 0);
+            });
+
+            // Comparison chart
+            destroyChart('chart-camera-comparison');
+            const camLabels = cams.map(c => c.replace(/_/g, ' '));
+            chartInstances['chart-camera-comparison'] = new Chart(document.getElementById('chart-camera-comparison'), {
+                type: 'bar',
+                data: {
+                    labels: camLabels,
+                    datasets: [
+                        { label: 'Alerts', data: cams.map(c => data.alerts_by_camera[c] || 0), backgroundColor: '#f59e0bcc', borderRadius: 6 },
+                        { label: 'Trajectory Points', data: cams.map(c => data.trajectory_points_by_camera[c] || 0), backgroundColor: '#3b82f6cc', borderRadius: 6 },
+                        { label: 'Threats', data: cams.map(c => { const t = data.threats_by_camera.find(x => x.camera_source===c); return t ? t.count : 0; }), backgroundColor: '#ef4444cc', borderRadius: 6 },
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { position: 'top' } },
+                    scales: { y: { beginAtZero: true } }
+                }
+            });
+        }
+
+        // ================================================================
+        // LIVE
+        // ================================================================
+        async function loadLive() {
+            const data = await fetchJSON('/api/live/feed');
+            if (!data) return;
+
+            document.getElementById('live-inside-count').textContent = data.currently_inside;
+            document.getElementById('live-timestamp').textContent = new Date(data.timestamp).toLocaleString();
+
+            // Latest entries
+            const entriesDiv = document.getElementById('live-latest-entries');
+            let html = '<h4 class="text-xs font-semibold text-[#64748b] uppercase tracking-wider mb-3">Latest Entries</h4>';
+            data.latest_entries.forEach(e => {
+                html += `<div class="flex items-center gap-2 mb-2 text-xs">
+                    <span class="w-2 h-2 rounded-full ${e.state === 'inside_now' ? 'bg-emerald-400' : 'bg-gray-500'}"></span>
+                    <span class="mono text-white">${e.person_id}</span>
+                    <span class="text-[#475569] ml-auto mono">${fmtTime(e.entry_time)}</span>
+                </div>`;
+            });
+            entriesDiv.innerHTML = html;
+
+            // Live alerts stream
+            const streamDiv = document.getElementById('live-alerts-stream');
+            if (data.latest_alerts.length === 0) {
+                streamDiv.innerHTML = '<div class="text-center text-[#475569] text-sm py-8">No alerts yet</div>';
+            } else {
+                streamDiv.innerHTML = data.latest_alerts.map(a => `
+                    <div class="flex items-start gap-3 p-3 rounded-lg bg-[#111827]/50 border border-[#2a3150]/50 transition hover:border-[#3a4170]">
+                        <div class="mt-0.5 text-lg">${{info:'🔵',warning:'🟡',critical:'🔴'}[a.alert_level]||'⚪'}</div>
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-2 flex-wrap">
+                                ${levelBadge(a.alert_level)}
+                                <span class="badge badge-purple">${(a.alert_type||'').replace(/_/g,' ')}</span>
+                                <span class="text-xs text-[#475569] mono ml-auto">${fmtTime(a.timestamp)}</span>
+                            </div>
+                            <div class="text-sm text-[#94a3b8] mt-1">${a.message || a.alert_type}</div>
+                            <div class="text-xs text-[#475569] mt-0.5">${(a.camera_source||'').replace(/_/g,' ')} ${a.person_id ? '· ' + a.person_id : ''}</div>
+                        </div>
+                    </div>
+                `).join('');
+            }
+        }
+
+        function startLiveUpdates() {
+            stopLiveUpdates();
+            liveInterval = setInterval(loadLive, 5000);
+        }
+        function stopLiveUpdates() {
+            if (liveInterval) { clearInterval(liveInterval); liveInterval = null; }
+        }
+
+        // ================================================================
+        // SEARCH
+        // ================================================================
+        let searchTimeout = null;
+        function handleSearch(event) {
+            const q = event.target.value.trim();
+            clearTimeout(searchTimeout);
+            if (q.length < 2) return;
+            searchTimeout = setTimeout(async () => {
+                const data = await fetchJSON(`/api/search?q=${encodeURIComponent(q)}`);
+                if (!data) return;
+                // If we find people, switch to people section and show results
+                if (data.people.length > 0) {
+                    switchSection('people');
+                    const tbody = document.getElementById('people-tbody');
+                    tbody.innerHTML = data.people.map(p => `
+                        <tr>
+                            <td><span class="font-medium text-white mono text-xs">${p.person_id}</span></td>
+                            <td>${stateBadge(p.state)}</td>
+                            <td class="mono text-xs">${fmtTime(p.entry_time)}</td>
+                            <td class="mono text-xs">${fmtDuration(p.duration_seconds)}</td>
+                            <td class="mono text-xs">${p.avg_velocity ? p.avg_velocity.toFixed(2) + ' m/s' : '--'}</td>
+                            <td class="mono text-xs">${p.max_velocity ? p.max_velocity.toFixed(2) + ' m/s' : '--'}</td>
+                            <td>
+                                <div class="flex items-center gap-2">
+                                    <div class="threat-bar w-16"><div class="threat-bar-fill" style="width:${Math.min(p.threat_score*100,100)}%;background:${threatColor(p.threat_score)};"></div></div>
+                                    <span class="mono text-xs" style="color:${threatColor(p.threat_score)}">${p.threat_score ? p.threat_score.toFixed(3) : '0'}</span>
+                                </div>
+                            </td>
+                            <td class="mono text-xs">${p.alert_count || 0}</td>
+                            <td><button onclick="openPersonDetail('${p.person_id}')" class="text-xs text-blue-400 hover:text-blue-300 font-medium">Details →</button></td>
+                        </tr>
+                    `).join('');
+                    document.getElementById('people-count').textContent = `${data.people.length} results`;
+                }
+            }, 350);
+        }
+
+        // ================================================================
+        // REFRESH ALL
+        // ================================================================
+        async function refreshAll() {
+            await loadOverview();
+            updateTimestamp();
+        }
+
+        async function resetDatabase() {
+            if (!confirm('This will permanently delete ALL analytics data (people, alerts, threats, trajectories). Continue?')) return;
+            try {
+                const res = await fetch('/api/db/reset', { method: 'POST' });
+                const data = await res.json();
+                alert(data.message || 'Database cleared.');
+                refreshAll();
+            } catch(e) {
+                alert('Failed to reset database: ' + e.message);
+            }
+        }
+
+        function startAutoRefresh() {
+            if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+            // Refresh every 3 seconds when bridge is running, every 15 seconds otherwise
+            const interval = bridgeRunning ? 3000 : 15000;
+            autoRefreshInterval = setInterval(async () => {
+                await refreshAll();
+            }, interval);
+        }
+
+        // ================================================================
+        // INIT
+        // ================================================================
+        window.addEventListener('DOMContentLoaded', () => {
+            loadOverview();
+            startAutoRefresh();
+        });
+    </script>
+    {% endraw %}
+</body>
+</html>

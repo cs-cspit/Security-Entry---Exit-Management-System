@@ -1,0 +1,1659 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Live Monitor — SecureVision</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link
+            href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap"
+            rel="stylesheet"
+        />
+        <style>
+            :root {
+                --bg-primary: #06090f;
+                --bg-secondary: #0d1117;
+                --bg-card: #161b22;
+                --bg-card-alt: #1c2333;
+                --border-color: #21262d;
+                --border-glow: #30363d;
+                --text-primary: #e6edf3;
+                --text-secondary: #8b949e;
+                --text-muted: #484f58;
+                --accent-blue: #58a6ff;
+                --accent-cyan: #3ddbd9;
+                --accent-green: #3fb950;
+                --accent-yellow: #d29922;
+                --accent-orange: #db6d28;
+                --accent-red: #f85149;
+                --accent-purple: #bc8cff;
+            }
+
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+
+            body {
+                font-family:
+                    "Inter",
+                    -apple-system,
+                    sans-serif;
+                background: var(--bg-primary);
+                color: var(--text-primary);
+                min-height: 100vh;
+                overflow-x: hidden;
+            }
+
+            .mono {
+                font-family: "JetBrains Mono", monospace;
+            }
+
+            ::-webkit-scrollbar {
+                width: 5px;
+                height: 5px;
+            }
+            ::-webkit-scrollbar-track {
+                background: transparent;
+            }
+            ::-webkit-scrollbar-thumb {
+                background: #21262d;
+                border-radius: 3px;
+            }
+
+            /* Background grid effect */
+            .bg-grid {
+                position: fixed;
+                inset: 0;
+                z-index: -1;
+                background-image:
+                    linear-gradient(
+                        rgba(88, 166, 255, 0.03) 1px,
+                        transparent 1px
+                    ),
+                    linear-gradient(
+                        90deg,
+                        rgba(88, 166, 255, 0.03) 1px,
+                        transparent 1px
+                    );
+                background-size: 40px 40px;
+            }
+
+            /* Camera feed container */
+            .camera-feed {
+                position: relative;
+                background: #000;
+                border-radius: 12px;
+                overflow: hidden;
+                border: 1px solid var(--border-color);
+                transition:
+                    border-color 0.3s,
+                    box-shadow 0.3s;
+                aspect-ratio: 4 / 3;
+            }
+            .camera-feed:hover {
+                border-color: var(--border-glow);
+                box-shadow: 0 0 30px rgba(88, 166, 255, 0.06);
+            }
+            .camera-feed img {
+                width: 100%;
+                height: 100%;
+                object-fit: contain;
+                display: block;
+            }
+            .camera-feed .cam-label {
+                position: absolute;
+                top: 8px;
+                left: 8px;
+                padding: 4px 10px;
+                border-radius: 6px;
+                font-size: 0.65rem;
+                font-weight: 700;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+                backdrop-filter: blur(8px);
+                z-index: 2;
+            }
+            .cam-label.entry {
+                background: rgba(63, 185, 80, 0.25);
+                color: #3fb950;
+                border: 1px solid rgba(63, 185, 80, 0.3);
+            }
+            .cam-label.room {
+                background: rgba(88, 166, 255, 0.25);
+                color: #58a6ff;
+                border: 1px solid rgba(88, 166, 255, 0.3);
+            }
+            .cam-label.exit {
+                background: rgba(248, 81, 73, 0.25);
+                color: #f85149;
+                border: 1px solid rgba(248, 81, 73, 0.3);
+            }
+
+            .camera-feed .cam-fps {
+                position: absolute;
+                bottom: 8px;
+                right: 8px;
+                padding: 2px 8px;
+                border-radius: 4px;
+                font-size: 0.6rem;
+                font-weight: 600;
+                background: rgba(0, 0, 0, 0.7);
+                color: #8b949e;
+                backdrop-filter: blur(4px);
+                z-index: 2;
+            }
+
+            .camera-feed .cam-offline {
+                position: absolute;
+                inset: 0;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                background: linear-gradient(135deg, #0d1117, #161b22);
+                z-index: 1;
+            }
+
+            /* Glass card */
+            .card {
+                background: linear-gradient(
+                    135deg,
+                    rgba(22, 27, 34, 0.95),
+                    rgba(13, 17, 23, 0.98)
+                );
+                border: 1px solid var(--border-color);
+                border-radius: 12px;
+                backdrop-filter: blur(8px);
+            }
+
+            /* Stat badge */
+            .stat-box {
+                text-align: center;
+                padding: 12px 8px;
+                border-radius: 10px;
+                border: 1px solid var(--border-color);
+                background: rgba(22, 27, 34, 0.6);
+            }
+            .stat-box .stat-value {
+                font-size: 1.8rem;
+                font-weight: 800;
+                line-height: 1;
+                letter-spacing: -0.03em;
+            }
+            .stat-box .stat-label {
+                font-size: 0.65rem;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+                color: var(--text-muted);
+                margin-top: 4px;
+            }
+
+            /* Alert badge */
+            .badge {
+                display: inline-flex;
+                align-items: center;
+                padding: 2px 8px;
+                border-radius: 9999px;
+                font-size: 0.6rem;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+            }
+            .badge-info {
+                background: rgba(88, 166, 255, 0.15);
+                color: #58a6ff;
+            }
+            .badge-warning {
+                background: rgba(210, 153, 34, 0.15);
+                color: #d29922;
+            }
+            .badge-critical {
+                background: rgba(248, 81, 73, 0.15);
+                color: #f85149;
+            }
+            .badge-green {
+                background: rgba(63, 185, 80, 0.15);
+                color: #3fb950;
+            }
+            .badge-purple {
+                background: rgba(188, 140, 255, 0.15);
+                color: #bc8cff;
+            }
+
+            /* Pulse animation */
+            @keyframes pulse-live {
+                0%,
+                100% {
+                    opacity: 1;
+                    transform: scale(1);
+                }
+                50% {
+                    opacity: 0.4;
+                    transform: scale(1.5);
+                }
+            }
+            .live-dot {
+                width: 7px;
+                height: 7px;
+                border-radius: 50%;
+                background: #3fb950;
+                animation: pulse-live 2s ease-in-out infinite;
+                display: inline-block;
+                flex-shrink: 0;
+            }
+            .live-dot.off {
+                background: #484f58;
+                animation: none;
+            }
+            .live-dot.warn {
+                background: #d29922;
+            }
+
+            /* Activity ring */
+            @keyframes ring-spin {
+                from {
+                    transform: rotate(0deg);
+                }
+                to {
+                    transform: rotate(360deg);
+                }
+            }
+            .activity-ring {
+                width: 120px;
+                height: 120px;
+                border-radius: 50%;
+                border: 4px solid var(--border-color);
+                border-top-color: var(--accent-green);
+                animation: ring-spin 3s linear infinite;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .activity-ring-inner {
+                width: 100px;
+                height: 100px;
+                border-radius: 50%;
+                background: var(--bg-secondary);
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+            }
+
+            /* Alert item */
+            .alert-item {
+                display: flex;
+                align-items: flex-start;
+                gap: 10px;
+                padding: 10px 12px;
+                border-radius: 8px;
+                transition: background 0.15s;
+                border-bottom: 1px solid rgba(33, 38, 45, 0.5);
+            }
+            .alert-item:last-child {
+                border-bottom: none;
+            }
+            .alert-item:hover {
+                background: rgba(88, 166, 255, 0.04);
+            }
+            .alert-item .alert-icon {
+                font-size: 1rem;
+                flex-shrink: 0;
+                margin-top: 1px;
+            }
+            .alert-item .alert-body {
+                flex: 1;
+                min-width: 0;
+            }
+            .alert-item .alert-msg {
+                font-size: 0.78rem;
+                color: var(--text-secondary);
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .alert-item .alert-meta {
+                font-size: 0.65rem;
+                color: var(--text-muted);
+                margin-top: 2px;
+            }
+
+            /* Person row */
+            .person-row {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                padding: 8px 12px;
+                border-radius: 8px;
+                transition: background 0.15s;
+                border-bottom: 1px solid rgba(33, 38, 45, 0.4);
+            }
+            .person-row:last-child {
+                border-bottom: none;
+            }
+            .person-row:hover {
+                background: rgba(63, 185, 80, 0.05);
+            }
+
+            /* Threat bar */
+            .threat-bar {
+                height: 5px;
+                border-radius: 3px;
+                background: var(--border-color);
+                overflow: hidden;
+                width: 60px;
+            }
+            .threat-bar-fill {
+                height: 100%;
+                border-radius: 3px;
+            }
+
+            /* Start button */
+            .btn-start {
+                padding: 12px 28px;
+                border: none;
+                border-radius: 10px;
+                font-weight: 700;
+                font-size: 0.9rem;
+                cursor: pointer;
+                transition: all 0.25s;
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .btn-start.primary {
+                background: linear-gradient(135deg, #238636, #2ea043);
+                color: white;
+                box-shadow: 0 4px 14px rgba(46, 160, 67, 0.3);
+            }
+            .btn-start.primary:hover {
+                transform: translateY(-1px);
+                box-shadow: 0 6px 20px rgba(46, 160, 67, 0.4);
+            }
+            .btn-start.danger {
+                background: linear-gradient(135deg, #b62324, #da3633);
+                color: white;
+                box-shadow: 0 4px 14px rgba(218, 54, 51, 0.2);
+            }
+            .btn-start.danger:hover {
+                transform: translateY(-1px);
+            }
+            .btn-start.secondary {
+                background: var(--bg-card);
+                color: var(--text-secondary);
+                border: 1px solid var(--border-color);
+            }
+            .btn-start.secondary:hover {
+                color: var(--text-primary);
+                border-color: var(--border-glow);
+            }
+            .btn-start:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+                transform: none !important;
+            }
+
+            /* Mode indicator */
+            .mode-chip {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 4px 12px;
+                border-radius: 8px;
+                font-size: 0.7rem;
+                font-weight: 700;
+                letter-spacing: 0.04em;
+            }
+            .mode-chip.full {
+                background: rgba(63, 185, 80, 0.12);
+                color: #3fb950;
+                border: 1px solid rgba(63, 185, 80, 0.2);
+            }
+            .mode-chip.lite {
+                background: rgba(210, 153, 34, 0.12);
+                color: #d29922;
+                border: 1px solid rgba(210, 153, 34, 0.2);
+            }
+            .mode-chip.raw {
+                background: rgba(88, 166, 255, 0.12);
+                color: #58a6ff;
+                border: 1px solid rgba(88, 166, 255, 0.2);
+            }
+            .mode-chip.off {
+                background: rgba(72, 79, 88, 0.12);
+                color: #484f58;
+                border: 1px solid rgba(72, 79, 88, 0.2);
+            }
+
+            /* Chart sizing */
+            .mini-chart {
+                height: 160px;
+            }
+
+            /* Fade in */
+            @keyframes fadeIn {
+                from {
+                    opacity: 0;
+                }
+                to {
+                    opacity: 1;
+                }
+            }
+            .fade-in {
+                animation: fadeIn 0.6s ease forwards;
+            }
+
+            /* Responsive */
+            @media (max-width: 1280px) {
+                .cameras-grid {
+                    grid-template-columns: 1fr !important;
+                }
+                .main-layout {
+                    grid-template-columns: 1fr !important;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="bg-grid"></div>
+
+        <!-- Top Header Bar -->
+        <header
+            class="sticky top-0 z-30 border-b border-[#21262d] bg-[#06090f]/95 backdrop-blur-xl"
+        >
+            <div
+                class="max-w-[1920px] mx-auto px-4 py-2.5 flex items-center justify-between"
+            >
+                <!-- Left: Brand -->
+                <div class="flex items-center gap-3">
+                    <a
+                        href="/"
+                        class="flex items-center gap-2.5 text-decoration-none"
+                    >
+                        <div
+                            class="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center text-white font-bold text-sm shadow-lg shadow-blue-500/20"
+                        >
+                            S
+                        </div>
+                        <span
+                            class="text-sm font-bold text-white tracking-tight"
+                            >SecureVision</span
+                        >
+                    </a>
+                    <span class="text-[#30363d] mx-1">/</span>
+                    <span class="text-sm font-semibold text-[#58a6ff]"
+                        >Live Monitor</span
+                    >
+                </div>
+
+                <!-- Center: Status -->
+                <div class="flex items-center gap-4">
+                    <div class="flex items-center gap-2" id="status-indicator">
+                        <span class="live-dot off" id="header-dot"></span>
+                        <span
+                            class="text-xs text-[#484f58] font-medium"
+                            id="header-status"
+                            >Offline</span
+                        >
+                    </div>
+                    <span class="mode-chip off" id="mode-chip">
+                        <span id="mode-chip-dot">●</span>
+                        <span id="mode-chip-label">OFF</span>
+                    </span>
+                    <span class="text-xs text-[#484f58] mono" id="header-clock"
+                        >--:--:--</span
+                    >
+                </div>
+
+                <!-- Right: Controls -->
+                <div class="flex items-center gap-2">
+                    <a
+                        href="/"
+                        class="btn-start secondary text-xs"
+                        style="padding: 6px 14px"
+                    >
+                        📊 Dashboard
+                    </a>
+                    <button
+                        class="btn-start primary text-xs"
+                        id="btn-toggle"
+                        onclick="toggleBridge()"
+                        style="padding: 6px 16px"
+                    >
+                        ▶ Start Cameras
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="max-w-[1920px] mx-auto p-4">
+            <!-- Startup Panel (shown when bridge is off) -->
+            <div
+                id="startup-panel"
+                class="flex flex-col items-center justify-center py-20"
+            >
+                <div class="text-center mb-8">
+                    <div class="text-6xl mb-4">📹</div>
+                    <h2 class="text-2xl font-bold text-white mb-2">
+                        Live Security Monitor
+                    </h2>
+                    <p
+                        class="text-sm text-[#8b949e] max-w-md mx-auto leading-relaxed"
+                    >
+                        Stream all three cameras (Entry, Room, Exit) with
+                        real-time detection overlays and live analytics — all in
+                        one view.
+                    </p>
+                </div>
+
+                <button
+                    class="btn-start primary"
+                    id="btn-start-main"
+                    onclick="toggleBridge()"
+                >
+                    <span style="font-size: 1.2em">▶</span>
+                    Start Camera System
+                </button>
+
+                <!-- Inline error/info panel — shown instead of alert() popups -->
+                <div
+                    id="bridge-error-panel"
+                    style="display: none"
+                    class="mt-6 w-full max-w-lg rounded-lg border border-[#f0883e55] bg-[#2d1f0e] px-5 py-4 text-left"
+                >
+                    <div class="flex items-start gap-3">
+                        <span style="font-size: 1.4em; line-height: 1">⚠️</span>
+                        <div>
+                            <p
+                                class="text-sm font-semibold text-[#f0883e] mb-1"
+                                id="bridge-error-title"
+                            >
+                                Camera system is not running
+                            </p>
+                            <p
+                                class="text-xs text-[#c9a96e] leading-relaxed mb-3"
+                                id="bridge-error-body"
+                            >
+                                The YOLO26 camera engine runs as a separate
+                                process. Open a new terminal tab and run:
+                            </p>
+                            <pre
+                                class="text-xs bg-[#0d1117] text-[#79c0ff] rounded px-3 py-2 mb-3 select-all overflow-x-auto"
+                            >
+cd ~/VSCode/ML/Security\ Entry\ \&\ Exit\ Management\ System
+source venv/bin/activate
+python yolo26_complete_system.py</pre
+                            >
+                            <p class="text-xs text-[#8b949e]">
+                                Once it boots, come back here and click
+                                <strong class="text-white"
+                                    >Start Camera System</strong
+                                >
+                                again. The dashboard will connect automatically.
+                            </p>
+                        </div>
+                    </div>
+                    <button
+                        onclick="
+                            document.getElementById(
+                                'bridge-error-panel',
+                            ).style.display = 'none'
+                        "
+                        class="mt-3 text-xs text-[#484f58] hover:text-[#8b949e] underline"
+                    >
+                        Dismiss
+                    </button>
+                </div>
+
+                <div class="mt-6 text-xs text-[#484f58] text-center space-y-1">
+                    <p>
+                        The system will auto-detect connected cameras and choose
+                        the best processing mode:
+                    </p>
+                    <div class="flex items-center justify-center gap-4 mt-3">
+                        <span class="mode-chip full"
+                            >● FULL — YOLO26 + OSNet</span
+                        >
+                        <span class="mode-chip lite"
+                            >● LITE — Haar + Histogram</span
+                        >
+                        <span class="mode-chip raw">● RAW — Stream Only</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Live View (shown when bridge is running) -->
+            <div id="live-view" style="display: none" class="fade-in">
+                <!-- Camera Feeds Row -->
+                <div
+                    class="cameras-grid grid grid-cols-3 gap-3 mb-4"
+                    style="grid-template-columns: 1fr 1fr 1fr"
+                >
+                    <!-- Entry Camera -->
+                    <div class="camera-feed" id="cam-container-entry">
+                        <span class="cam-label entry">● Entry Gate</span>
+                        <span class="cam-fps mono" id="fps-entry">-- fps</span>
+                        <img
+                            id="cam-entry"
+                            src=""
+                            alt="Entry Camera"
+                            style="display: none"
+                        />
+                        <div class="cam-offline" id="cam-offline-entry">
+                            <div class="text-2xl mb-2">📹</div>
+                            <div class="text-xs text-[#484f58] font-medium">
+                                ENTRY CAMERA
+                            </div>
+                            <div class="text-[10px] text-[#30363d] mt-1">
+                                Connecting...
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Room Camera -->
+                    <div class="camera-feed" id="cam-container-room">
+                        <span class="cam-label room">● Room Monitor</span>
+                        <span class="cam-fps mono" id="fps-room">-- fps</span>
+                        <img
+                            id="cam-room"
+                            src=""
+                            alt="Room Camera"
+                            style="display: none"
+                        />
+                        <div class="cam-offline" id="cam-offline-room">
+                            <div class="text-2xl mb-2">📹</div>
+                            <div class="text-xs text-[#484f58] font-medium">
+                                ROOM CAMERA
+                            </div>
+                            <div class="text-[10px] text-[#30363d] mt-1">
+                                Connecting...
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Exit Camera -->
+                    <div class="camera-feed" id="cam-container-exit">
+                        <span class="cam-label exit">● Exit Gate</span>
+                        <span class="cam-fps mono" id="fps-exit">-- fps</span>
+                        <img
+                            id="cam-exit"
+                            src=""
+                            alt="Exit Camera"
+                            style="display: none"
+                        />
+                        <div class="cam-offline" id="cam-offline-exit">
+                            <div class="text-2xl mb-2">📹</div>
+                            <div class="text-xs text-[#484f58] font-medium">
+                                EXIT CAMERA
+                            </div>
+                            <div class="text-[10px] text-[#30363d] mt-1">
+                                Connecting...
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Analytics Panel Below Cameras -->
+                <div
+                    class="main-layout grid gap-4"
+                    style="grid-template-columns: 1fr 1fr 1fr"
+                >
+                    <!-- Column 1: Live Stats -->
+                    <div class="card p-4">
+                        <div class="flex items-center gap-2 mb-4">
+                            <span class="live-dot" id="stats-dot"></span>
+                            <h3
+                                class="text-xs font-bold text-white uppercase tracking-wider"
+                            >
+                                Real-Time Stats
+                            </h3>
+                            <span
+                                class="text-[10px] text-[#484f58] mono ml-auto"
+                                id="stats-updated"
+                                >--</span
+                            >
+                        </div>
+
+                        <!-- Occupancy Ring -->
+                        <div class="flex justify-center mb-4">
+                            <div class="activity-ring" id="occupancy-ring">
+                                <div class="activity-ring-inner">
+                                    <div
+                                        class="text-3xl font-black mono"
+                                        id="stat-inside"
+                                        style="color: var(--accent-green)"
+                                    >
+                                        0
+                                    </div>
+                                    <div
+                                        class="text-[9px] font-bold uppercase tracking-widest text-[#484f58]"
+                                    >
+                                        Inside
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Stat Grid -->
+                        <div class="grid grid-cols-3 gap-2 mb-4">
+                            <div class="stat-box">
+                                <div
+                                    class="stat-value mono"
+                                    style="color: var(--accent-cyan)"
+                                    id="stat-registered"
+                                >
+                                    0
+                                </div>
+                                <div class="stat-label">Registered</div>
+                            </div>
+                            <div class="stat-box">
+                                <div
+                                    class="stat-value mono"
+                                    style="color: var(--accent-blue)"
+                                    id="stat-exited"
+                                >
+                                    0
+                                </div>
+                                <div class="stat-label">Exited</div>
+                            </div>
+                            <div class="stat-box">
+                                <div
+                                    class="stat-value mono"
+                                    style="color: var(--accent-red)"
+                                    id="stat-unauthorized"
+                                >
+                                    0
+                                </div>
+                                <div class="stat-label">Unauth</div>
+                            </div>
+                        </div>
+
+                        <!-- Detection Counts -->
+                        <div class="space-y-2">
+                            <div
+                                class="text-[10px] font-bold uppercase tracking-widest text-[#484f58] mb-1"
+                            >
+                                Detections
+                            </div>
+                            <div
+                                class="flex items-center justify-between text-xs"
+                            >
+                                <span class="text-[#8b949e]">Entry Camera</span>
+                                <span
+                                    class="mono text-white"
+                                    id="stat-det-entry"
+                                    >0</span
+                                >
+                            </div>
+                            <div
+                                class="flex items-center justify-between text-xs"
+                            >
+                                <span class="text-[#8b949e]">Room Camera</span>
+                                <span class="mono text-white" id="stat-det-room"
+                                    >0</span
+                                >
+                            </div>
+                            <div
+                                class="flex items-center justify-between text-xs"
+                            >
+                                <span class="text-[#8b949e]">Exit Camera</span>
+                                <span class="mono text-white" id="stat-det-exit"
+                                    >0</span
+                                >
+                            </div>
+                            <div
+                                class="border-t border-[#21262d] pt-2 flex items-center justify-between text-xs"
+                            >
+                                <span class="text-[#8b949e] font-medium"
+                                    >Total</span
+                                >
+                                <span
+                                    class="mono text-white font-bold"
+                                    id="stat-det-total"
+                                    >0</span
+                                >
+                            </div>
+                        </div>
+
+                        <!-- Uptime -->
+                        <div class="mt-4 pt-3 border-t border-[#21262d]">
+                            <div
+                                class="flex items-center justify-between text-xs"
+                            >
+                                <span class="text-[#484f58]">Uptime</span>
+                                <span
+                                    class="mono text-[#8b949e]"
+                                    id="stat-uptime"
+                                    >0s</span
+                                >
+                            </div>
+                            <div
+                                class="flex items-center justify-between text-xs mt-1"
+                            >
+                                <span class="text-[#484f58]">Cameras</span>
+                                <span
+                                    class="mono text-[#8b949e]"
+                                    id="stat-cameras"
+                                    >0</span
+                                >
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Column 2: Active People + Mini Chart -->
+                    <div class="flex flex-col gap-4">
+                        <!-- Active People List -->
+                        <div class="card p-4 flex-1">
+                            <div class="flex items-center justify-between mb-3">
+                                <h3
+                                    class="text-xs font-bold text-white uppercase tracking-wider"
+                                >
+                                    People Inside
+                                </h3>
+                                <span
+                                    class="badge badge-green mono"
+                                    id="people-count-badge"
+                                    >0</span
+                                >
+                            </div>
+                            <div
+                                class="overflow-y-auto"
+                                style="max-height: 260px"
+                                id="active-people-list"
+                            >
+                                <div
+                                    class="text-center text-[#484f58] text-xs py-6"
+                                >
+                                    No one inside
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Mini Detection Chart -->
+                        <div class="card p-4">
+                            <h3
+                                class="text-xs font-bold text-white uppercase tracking-wider mb-3"
+                            >
+                                Detection Activity
+                            </h3>
+                            <div class="mini-chart">
+                                <canvas id="chart-detections"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Column 3: Live Alerts + DB Stats -->
+                    <div class="flex flex-col gap-4">
+                        <!-- Live Alerts -->
+                        <div class="card p-4 flex-1">
+                            <div class="flex items-center justify-between mb-3">
+                                <div class="flex items-center gap-2">
+                                    <span>🔔</span>
+                                    <h3
+                                        class="text-xs font-bold text-white uppercase tracking-wider"
+                                    >
+                                        Live Alerts
+                                    </h3>
+                                </div>
+                                <span
+                                    class="badge badge-warning mono"
+                                    id="alert-count-badge"
+                                    >0</span
+                                >
+                            </div>
+                            <div
+                                class="overflow-y-auto"
+                                style="max-height: 260px"
+                                id="live-alerts-list"
+                            >
+                                <div
+                                    class="text-center text-[#484f58] text-xs py-6"
+                                >
+                                    No alerts yet
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- DB Quick Stats -->
+                        <div class="card p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h3
+                                    class="text-xs font-bold text-white uppercase tracking-wider"
+                                >
+                                    Database Totals
+                                </h3>
+                                <a
+                                    href="/"
+                                    class="text-[10px] text-[#58a6ff] hover:text-[#79c0ff] font-medium"
+                                    >Full Dashboard →</a
+                                >
+                            </div>
+                            <div class="grid grid-cols-2 gap-2">
+                                <div
+                                    class="flex items-center justify-between text-xs p-2 rounded-lg"
+                                    style="
+                                        background: rgba(22, 27, 34, 0.6);
+                                        border: 1px solid #21262d;
+                                    "
+                                >
+                                    <span class="text-[#8b949e]">People</span>
+                                    <span
+                                        class="mono font-bold text-white"
+                                        id="db-total-people"
+                                        >--</span
+                                    >
+                                </div>
+                                <div
+                                    class="flex items-center justify-between text-xs p-2 rounded-lg"
+                                    style="
+                                        background: rgba(22, 27, 34, 0.6);
+                                        border: 1px solid #21262d;
+                                    "
+                                >
+                                    <span class="text-[#8b949e]">Alerts</span>
+                                    <span
+                                        class="mono font-bold text-[#d29922]"
+                                        id="db-total-alerts"
+                                        >--</span
+                                    >
+                                </div>
+                                <div
+                                    class="flex items-center justify-between text-xs p-2 rounded-lg"
+                                    style="
+                                        background: rgba(22, 27, 34, 0.6);
+                                        border: 1px solid #21262d;
+                                    "
+                                >
+                                    <span class="text-[#8b949e]">Threats</span>
+                                    <span
+                                        class="mono font-bold text-[#f85149]"
+                                        id="db-total-threats"
+                                        >--</span
+                                    >
+                                </div>
+                                <div
+                                    class="flex items-center justify-between text-xs p-2 rounded-lg"
+                                    style="
+                                        background: rgba(22, 27, 34, 0.6);
+                                        border: 1px solid #21262d;
+                                    "
+                                >
+                                    <span class="text-[#8b949e]">Entries</span>
+                                    <span
+                                        class="mono font-bold text-[#3fb950]"
+                                        id="db-total-entries"
+                                        >--</span
+                                    >
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- end #live-view -->
+        </div>
+        <!-- end max-w container -->
+
+        <!-- ================================================================== -->
+        <!-- JAVASCRIPT -->
+        <!-- ================================================================== -->
+        {% raw %}
+        <script>
+            // ── State ──────────────────────────────────────────────────
+            let bridgeRunning = false;
+            let pollInterval = null;
+            let dbPollInterval = null;
+            let clockInterval = null;
+            let chartInstance = null;
+            const POLL_MS = 1500; // Bridge stats poll rate
+            const DB_POLL_MS = 3000; // Database poll rate
+            const detectionHistory = { entry: [], room: [], exit: [] };
+            const MAX_HISTORY = 30;
+
+            // ── Helpers ────────────────────────────────────────────────
+            function fmt(n) {
+                return n != null ? Number(n).toLocaleString() : "0";
+            }
+            function fmtTime(iso) {
+                if (!iso) return "--";
+                const d = new Date(iso);
+                if (isNaN(d)) return iso;
+                return d.toLocaleTimeString("en-US", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit",
+                });
+            }
+            function fmtDuration(s) {
+                if (!s || s <= 0) return "0s";
+                s = Math.round(s);
+                if (s < 60) return s + "s";
+                if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
+                return (
+                    Math.floor(s / 3600) +
+                    "h " +
+                    Math.floor((s % 3600) / 60) +
+                    "m"
+                );
+            }
+            function threatColor(score) {
+                if (score >= 0.8) return "#f85149";
+                if (score >= 0.6) return "#db6d28";
+                if (score >= 0.3) return "#d29922";
+                return "#3fb950";
+            }
+            function levelIcon(level) {
+                return (
+                    { info: "🔵", warning: "🟡", critical: "🔴" }[level] || "⚪"
+                );
+            }
+            function levelBadge(level) {
+                const cls = {
+                    info: "badge-info",
+                    warning: "badge-warning",
+                    critical: "badge-critical",
+                };
+                return `<span class="badge ${cls[level] || "badge-info"}">${level}</span>`;
+            }
+
+            // ── Clock ──────────────────────────────────────────────────
+            function updateClock() {
+                document.getElementById("header-clock").textContent =
+                    new Date().toLocaleTimeString("en-US", { hour12: false });
+            }
+            clockInterval = setInterval(updateClock, 1000);
+            updateClock();
+
+            // ── Chart Setup ────────────────────────────────────────────
+            Chart.defaults.color = "#8b949e";
+            Chart.defaults.borderColor = "rgba(33,38,45,0.6)";
+            Chart.defaults.font.family = "'Inter', sans-serif";
+            Chart.defaults.font.size = 10;
+
+            function initChart() {
+                if (chartInstance) chartInstance.destroy();
+                const ctx = document.getElementById("chart-detections");
+                if (!ctx) return;
+                chartInstance = new Chart(ctx, {
+                    type: "line",
+                    data: {
+                        labels: [],
+                        datasets: [
+                            {
+                                label: "Entry",
+                                data: [],
+                                borderColor: "#3fb950",
+                                backgroundColor: "rgba(63,185,80,0.1)",
+                                fill: true,
+                                tension: 0.35,
+                                pointRadius: 0,
+                                borderWidth: 1.5,
+                            },
+                            {
+                                label: "Room",
+                                data: [],
+                                borderColor: "#58a6ff",
+                                backgroundColor: "rgba(88,166,255,0.1)",
+                                fill: true,
+                                tension: 0.35,
+                                pointRadius: 0,
+                                borderWidth: 1.5,
+                            },
+                            {
+                                label: "Exit",
+                                data: [],
+                                borderColor: "#f85149",
+                                backgroundColor: "rgba(248,81,73,0.1)",
+                                fill: true,
+                                tension: 0.35,
+                                pointRadius: 0,
+                                borderWidth: 1.5,
+                            },
+                        ],
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: { duration: 300 },
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: "top",
+                                labels: {
+                                    usePointStyle: true,
+                                    pointStyleWidth: 6,
+                                    padding: 8,
+                                    boxWidth: 6,
+                                    font: { size: 9 },
+                                },
+                            },
+                            tooltip: {
+                                enabled: true,
+                                backgroundColor: "#161b22",
+                                borderColor: "#21262d",
+                                borderWidth: 1,
+                                titleFont: { size: 10 },
+                                bodyFont: { size: 10 },
+                                padding: 8,
+                                cornerRadius: 6,
+                            },
+                        },
+                        scales: {
+                            x: { display: false },
+                            y: {
+                                display: true,
+                                beginAtZero: true,
+                                grid: { color: "rgba(33,38,45,0.4)" },
+                                ticks: { stepSize: 1, font: { size: 9 } },
+                            },
+                        },
+                    },
+                });
+            }
+
+            let prevDetections = { entry: 0, room: 0, exit: 0 };
+
+            function updateChart(stats) {
+                if (!chartInstance) return;
+
+                const entryDelta =
+                    (stats.entry_detections || 0) - prevDetections.entry;
+                const roomDelta =
+                    (stats.room_detections || 0) - prevDetections.room;
+                const exitDelta =
+                    (stats.exit_detections || 0) - prevDetections.exit;
+
+                prevDetections.entry = stats.entry_detections || 0;
+                prevDetections.room = stats.room_detections || 0;
+                prevDetections.exit = stats.exit_detections || 0;
+
+                detectionHistory.entry.push(Math.max(0, entryDelta));
+                detectionHistory.room.push(Math.max(0, roomDelta));
+                detectionHistory.exit.push(Math.max(0, exitDelta));
+
+                if (detectionHistory.entry.length > MAX_HISTORY) {
+                    detectionHistory.entry.shift();
+                    detectionHistory.room.shift();
+                    detectionHistory.exit.shift();
+                }
+
+                const labels = detectionHistory.entry.map((_, i) =>
+                    i.toString(),
+                );
+                chartInstance.data.labels = labels;
+                chartInstance.data.datasets[0].data = [
+                    ...detectionHistory.entry,
+                ];
+                chartInstance.data.datasets[1].data = [
+                    ...detectionHistory.room,
+                ];
+                chartInstance.data.datasets[2].data = [
+                    ...detectionHistory.exit,
+                ];
+                chartInstance.update("none");
+            }
+
+            // ── Bridge Control ─────────────────────────────────────────
+            async function toggleBridge() {
+                const btn = document.getElementById("btn-toggle");
+                const btnMain = document.getElementById("btn-start-main");
+
+                if (bridgeRunning) {
+                    // Stop
+                    btn.disabled = true;
+                    btn.innerHTML = "⏳ Stopping...";
+                    try {
+                        await fetch("/api/bridge/stop", { method: "POST" });
+                    } catch (e) {}
+                    bridgeRunning = false;
+                    onBridgeStopped();
+                    btn.disabled = false;
+                } else {
+                    // Start
+                    btn.disabled = true;
+                    if (btnMain) btnMain.disabled = true;
+                    btn.innerHTML = "⏳ Starting...";
+                    if (btnMain)
+                        btnMain.innerHTML =
+                            '<span style="font-size:1.2em">⏳</span> Starting cameras...';
+
+                    try {
+                        const res = await fetch("/api/bridge/start", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({}),
+                        });
+                        const data = await res.json();
+                        if (data.status === "running") {
+                            bridgeRunning = true;
+                            btn.disabled = false;
+                            if (btnMain) btnMain.disabled = false;
+                            onBridgeStarted(data.mode, data.cameras_connected);
+                        } else if (data.status === "starting") {
+                            // Startup is running in the background — poll until ready
+                            await pollUntilBridgeReady(btn, btnMain);
+                        } else {
+                            showBridgeError(
+                                "Camera system is not running",
+                                data.message || "Unknown error",
+                            );
+                            btn.disabled = false;
+                            if (btnMain) btnMain.disabled = false;
+                            btn.innerHTML = "▶ Start Cameras";
+                            if (btnMain)
+                                btnMain.innerHTML =
+                                    '<span style="font-size:1.2em">▶</span> Start Camera System';
+                        }
+                    } catch (e) {
+                        showBridgeError("Connection error", e.message);
+                        btn.disabled = false;
+                        if (btnMain) btnMain.disabled = false;
+                        btn.innerHTML = "▶ Start Cameras";
+                        if (btnMain)
+                            btnMain.innerHTML =
+                                '<span style="font-size:1.2em">▶</span> Start Camera System';
+                    }
+                }
+            }
+
+            async function pollUntilBridgeReady(btn, btnMain) {
+                const MAX_WAIT_MS = 60000; // 60 seconds max
+                const POLL_INTERVAL_MS = 1500;
+                const start = Date.now();
+                let dots = 0;
+
+                while (Date.now() - start < MAX_WAIT_MS) {
+                    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+                    dots = (dots + 1) % 4;
+                    const dotStr = ".".repeat(dots + 1);
+                    btn.innerHTML = `⏳ Starting${dotStr}`;
+                    if (btnMain)
+                        btnMain.innerHTML = `<span style="font-size:1.2em">⏳</span> Starting cameras${dotStr}`;
+
+                    try {
+                        const res = await fetch("/api/bridge/status");
+                        const status = await res.json();
+
+                        if (status.running) {
+                            bridgeRunning = true;
+                            btn.disabled = false;
+                            if (btnMain) btnMain.disabled = false;
+                            onBridgeStarted(
+                                status.mode,
+                                status.cameras_connected,
+                            );
+                            return;
+                        }
+
+                        if (status.error) {
+                            showBridgeError(
+                                "Camera system unreachable",
+                                status.error,
+                            );
+                            btn.disabled = false;
+                            if (btnMain) btnMain.disabled = false;
+                            btn.innerHTML = "▶ Start Cameras";
+                            if (btnMain)
+                                btnMain.innerHTML =
+                                    '<span style="font-size:1.2em">▶</span> Start Camera System';
+                            return;
+                        }
+
+                        // status.starting === true → keep polling
+                    } catch (e) {
+                        // Network hiccup — keep trying
+                    }
+                }
+
+                // Timed out
+                showBridgeError(
+                    "Startup timed out",
+                    "yolo26_complete_system.py is taking too long to start. Check its terminal for errors.",
+                );
+                btn.disabled = false;
+                if (btnMain) btnMain.disabled = false;
+                btn.innerHTML = "▶ Start Cameras";
+                if (btnMain)
+                    btnMain.innerHTML =
+                        '<span style="font-size:1.2em">▶</span> Start Camera System';
+            }
+
+            function showBridgeError(title, body) {
+                const panel = document.getElementById("bridge-error-panel");
+                if (!panel) return;
+                const titleEl = document.getElementById("bridge-error-title");
+                const bodyEl = document.getElementById("bridge-error-body");
+                if (titleEl) titleEl.textContent = title;
+                if (bodyEl) bodyEl.textContent = body;
+                panel.style.display = "block";
+                panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            }
+
+            function onBridgeStarted(mode, camerasConnected) {
+                // Hide error panel if it was showing
+                const panel = document.getElementById("bridge-error-panel");
+                if (panel) panel.style.display = "none";
+                document.getElementById("startup-panel").style.display = "none";
+                document.getElementById("live-view").style.display = "block";
+
+                const btn = document.getElementById("btn-toggle");
+                btn.className = "btn-start danger text-xs";
+                btn.style.padding = "6px 16px";
+                btn.innerHTML = "■ Stop Cameras";
+
+                // Update status
+                const dot = document.getElementById("header-dot");
+                dot.className = "live-dot";
+                document.getElementById("header-status").textContent = "Live";
+                document.getElementById("header-status").style.color =
+                    "#3fb950";
+
+                // Mode chip
+                const modeMap = { FULL: "full", LITE: "lite", RAW: "raw" };
+                const modeLabels = {
+                    FULL: "FULL — YOLO26",
+                    LITE: "LITE — Haar",
+                    RAW: "RAW — Stream",
+                };
+                const chip = document.getElementById("mode-chip");
+                chip.className = "mode-chip " + (modeMap[mode] || "raw");
+                document.getElementById("mode-chip-label").textContent =
+                    modeLabels[mode] || mode;
+
+                // Connect camera MJPEG streams
+                connectCameraStreams();
+
+                // Start polling
+                initChart();
+                startPolling();
+            }
+
+            function onBridgeStopped() {
+                document.getElementById("startup-panel").style.display = "";
+                document.getElementById("live-view").style.display = "none";
+
+                const btn = document.getElementById("btn-toggle");
+                btn.className = "btn-start primary text-xs";
+                btn.style.padding = "6px 16px";
+                btn.innerHTML = "▶ Start Cameras";
+
+                const btnMain = document.getElementById("btn-start-main");
+                if (btnMain) {
+                    btnMain.innerHTML =
+                        '<span style="font-size:1.2em">▶</span> Start Camera System';
+                }
+
+                document.getElementById("header-dot").className =
+                    "live-dot off";
+                document.getElementById("header-status").textContent =
+                    "Offline";
+                document.getElementById("header-status").style.color =
+                    "#484f58";
+
+                const chip = document.getElementById("mode-chip");
+                chip.className = "mode-chip off";
+                document.getElementById("mode-chip-label").textContent = "OFF";
+
+                // Disconnect streams
+                disconnectCameraStreams();
+
+                // Stop polling
+                stopPolling();
+            }
+
+            // ── Camera Stream Connection ───────────────────────────────
+            function connectCameraStreams() {
+                const cameras = ["entry", "room", "exit"];
+                cameras.forEach((cam) => {
+                    const img = document.getElementById("cam-" + cam);
+                    const offline = document.getElementById(
+                        "cam-offline-" + cam,
+                    );
+                    // Set MJPEG source — the browser handles the continuous stream natively
+                    img.src = "/video/" + cam + "?t=" + Date.now();
+                    img.style.display = "block";
+                    img.onerror = function () {
+                        // Stream failed — show offline state
+                        img.style.display = "none";
+                        offline.style.display = "flex";
+                        offline.querySelector(".text-\\[10px\\]").textContent =
+                            "Stream error";
+                    };
+                    img.onload = function () {
+                        offline.style.display = "none";
+                    };
+                });
+            }
+
+            function disconnectCameraStreams() {
+                const cameras = ["entry", "room", "exit"];
+                cameras.forEach((cam) => {
+                    const img = document.getElementById("cam-" + cam);
+                    const offline = document.getElementById(
+                        "cam-offline-" + cam,
+                    );
+                    img.src = "";
+                    img.style.display = "none";
+                    offline.style.display = "flex";
+                    const textEl = offline.querySelector("div:last-child");
+                    if (textEl) textEl.textContent = "Disconnected";
+                });
+            }
+
+            // ── Polling ────────────────────────────────────────────────
+            function startPolling() {
+                stopPolling();
+                pollBridgeStatus();
+                pollDatabaseStats();
+                pollInterval = setInterval(pollBridgeStatus, POLL_MS);
+                dbPollInterval = setInterval(pollDatabaseStats, DB_POLL_MS);
+            }
+
+            function stopPolling() {
+                if (pollInterval) {
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                }
+                if (dbPollInterval) {
+                    clearInterval(dbPollInterval);
+                    dbPollInterval = null;
+                }
+            }
+
+            async function pollBridgeStatus() {
+                try {
+                    const res = await fetch("/api/bridge/status");
+                    const data = await res.json();
+
+                    if (!data.running) {
+                        bridgeRunning = false;
+                        onBridgeStopped();
+                        return;
+                    }
+
+                    const stats = data.stats || {};
+                    const activePeople = data.active_people || [];
+
+                    // Update stats
+                    document.getElementById("stat-inside").textContent =
+                        stats.inside || 0;
+                    document.getElementById("stat-registered").textContent =
+                        fmt(stats.registered);
+                    document.getElementById("stat-exited").textContent = fmt(
+                        stats.exited,
+                    );
+                    document.getElementById("stat-unauthorized").textContent =
+                        fmt(stats.unauthorized);
+                    document.getElementById("stat-det-entry").textContent = fmt(
+                        stats.entry_detections,
+                    );
+                    document.getElementById("stat-det-room").textContent = fmt(
+                        stats.room_detections,
+                    );
+                    document.getElementById("stat-det-exit").textContent = fmt(
+                        stats.exit_detections,
+                    );
+                    document.getElementById("stat-det-total").textContent = fmt(
+                        stats.total_detections,
+                    );
+                    document.getElementById("stat-uptime").textContent =
+                        fmtDuration(stats.uptime_seconds);
+                    document.getElementById("stat-cameras").textContent =
+                        stats.cameras_connected || 0;
+                    document.getElementById("stats-updated").textContent =
+                        new Date().toLocaleTimeString("en-US", {
+                            hour12: false,
+                        });
+
+                    // FPS labels
+                    document.getElementById("fps-entry").textContent =
+                        (stats.fps_entry || 0).toFixed(0) + " fps";
+                    document.getElementById("fps-room").textContent =
+                        (stats.fps_room || 0).toFixed(0) + " fps";
+                    document.getElementById("fps-exit").textContent =
+                        (stats.fps_exit || 0).toFixed(0) + " fps";
+
+                    // Occupancy ring color
+                    const inside = stats.inside || 0;
+                    const ring = document.getElementById("occupancy-ring");
+                    if (inside === 0) {
+                        ring.style.borderTopColor = "#484f58";
+                        document.getElementById("stat-inside").style.color =
+                            "#8b949e";
+                    } else if (inside <= 3) {
+                        ring.style.borderTopColor = "#3fb950";
+                        document.getElementById("stat-inside").style.color =
+                            "#3fb950";
+                    } else if (inside <= 6) {
+                        ring.style.borderTopColor = "#d29922";
+                        document.getElementById("stat-inside").style.color =
+                            "#d29922";
+                    } else {
+                        ring.style.borderTopColor = "#f85149";
+                        document.getElementById("stat-inside").style.color =
+                            "#f85149";
+                    }
+
+                    // Active people list
+                    const listEl =
+                        document.getElementById("active-people-list");
+                    const badge = document.getElementById("people-count-badge");
+                    badge.textContent = activePeople.length;
+
+                    if (activePeople.length === 0) {
+                        listEl.innerHTML =
+                            '<div class="text-center text-[#484f58] text-xs py-6">No one inside</div>';
+                    } else {
+                        listEl.innerHTML = activePeople
+                            .map(
+                                (p) => `
+                        <div class="person-row">
+                            <div class="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold" style="background:rgba(63,185,80,0.12);color:#3fb950;">
+                                ${p.person_id.replace("P", "").replace(/^0+/, "") || "?"}
+                            </div>
+                            <div class="flex-1 min-w-0">
+                                <div class="text-xs font-semibold text-white mono">${p.person_id}</div>
+                                <div class="text-[10px] text-[#484f58]">
+                                    ${fmtDuration(p.duration_seconds)} inside · ${p.trajectory_points} pts
+                                </div>
+                            </div>
+                            <div class="text-right">
+                                <div class="text-xs mono" style="color:${p.avg_velocity > 2 ? "#d29922" : "#8b949e"}">${p.avg_velocity.toFixed(1)} m/s</div>
+                            </div>
+                        </div>
+                    `,
+                            )
+                            .join("");
+                    }
+
+                    // Update chart
+                    updateChart(stats);
+                } catch (e) {
+                    console.error("Bridge poll error:", e);
+                }
+            }
+
+            async function pollDatabaseStats() {
+                try {
+                    // Fetch overview from the same API the main dashboard uses
+                    const [overview, latestAlerts] = await Promise.all([
+                        fetch("/api/overview").then((r) => r.json()),
+                        fetch("/api/alerts?limit=10").then((r) => r.json()),
+                    ]);
+
+                    if (overview) {
+                        document.getElementById("db-total-people").textContent =
+                            fmt(overview.total_people);
+                        document.getElementById("db-total-alerts").textContent =
+                            fmt(overview.total_alerts);
+                        document.getElementById(
+                            "db-total-threats",
+                        ).textContent = fmt(overview.total_threats);
+                        document.getElementById(
+                            "db-total-entries",
+                        ).textContent = fmt(overview.total_entries);
+                    }
+
+                    if (latestAlerts && latestAlerts.alerts) {
+                        const listEl =
+                            document.getElementById("live-alerts-list");
+                        const badge =
+                            document.getElementById("alert-count-badge");
+                        badge.textContent = latestAlerts.total || 0;
+
+                        if (latestAlerts.alerts.length === 0) {
+                            listEl.innerHTML =
+                                '<div class="text-center text-[#484f58] text-xs py-6">No alerts yet</div>';
+                        } else {
+                            listEl.innerHTML = latestAlerts.alerts
+                                .map(
+                                    (a) => `
+                            <div class="alert-item">
+                                <div class="alert-icon">${levelIcon(a.alert_level)}</div>
+                                <div class="alert-body">
+                                    <div class="flex items-center gap-2 mb-0.5">
+                                        ${levelBadge(a.alert_level)}
+                                        <span class="badge badge-purple">${(a.alert_type || "").replace(/_/g, " ")}</span>
+                                    </div>
+                                    <div class="alert-msg">${a.message || a.alert_type || "--"}</div>
+                                    <div class="alert-meta">${fmtTime(a.timestamp)} · ${(a.camera_source || "").replace(/_/g, " ")} ${a.person_id ? "· " + a.person_id : ""}</div>
+                                </div>
+                            </div>
+                        `,
+                                )
+                                .join("");
+                        }
+                    }
+                } catch (e) {
+                    console.error("DB poll error:", e);
+                }
+            }
+
+            // ── On page load: check if bridge is already running ──────
+            async function checkBridgeOnLoad() {
+                try {
+                    const res = await fetch("/api/bridge/status");
+                    const data = await res.json();
+                    if (data.running) {
+                        bridgeRunning = true;
+                        onBridgeStarted(data.mode, data.cameras_connected);
+                    }
+                } catch (e) {}
+            }
+
+            window.addEventListener("DOMContentLoaded", checkBridgeOnLoad);
+
+            // Clean up on page unload — but DON'T stop the bridge (so it survives refresh)
+            window.addEventListener("beforeunload", () => {
+                stopPolling();
+            });
+        </script>
+        {% endraw %}
+    </body>
+</html>

@@ -1,0 +1,77 @@
+# Phase 6 & 7: Multi-Person Tracking + Alert & Notification System
+# Install with: pip install -r requirements_phase6_7.txt
+#
+# IMPORTANT: YOLO26 (via ultralytics) ships ByteTrack and BoT-SORT natively.
+# You do NOT need to install: norfair, boxmot, filterpy, or deep-sort-realtime
+# Those libraries are superseded by model.track(persist=True, tracker="bytetrack.yaml")
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Core (already in requirements.txt — listed here for completeness)
+# ─────────────────────────────────────────────────────────────────────────────
+ultralytics>=8.3.0          # YOLO26 + built-in ByteTrack + BoT-SORT tracker
+opencv-python>=4.8.0
+numpy>=1.24.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 6: Multi-Person Tracking
+# ─────────────────────────────────────────────────────────────────────────────
+# ByteTrack is bundled inside ultralytics — no extra package needed.
+# The tracker config files (bytetrack.yaml, botsort.yaml) are also bundled.
+#
+# If you want to experiment with alternative trackers outside ultralytics:
+# boxmot>=10.0.0            # optional — only if switching to standalone tracker
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 7a: Enhanced Alert Manager
+# ─────────────────────────────────────────────────────────────────────────────
+
+# YAML config loader (alert_rules.yaml, system_config.yaml)
+pyyaml>=6.0.1
+
+# Telegram notifications (thin HTTP call — no bot framework needed)
+requests>=2.31.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 7b: FastAPI REST + WebSocket + MJPEG Bridge
+# ─────────────────────────────────────────────────────────────────────────────
+
+# FastAPI web framework
+fastapi>=0.111.0
+
+# ASGI server (runs FastAPI in a background daemon thread)
+uvicorn[standard]>=0.29.0
+
+# WebSocket support (bundled with uvicorn[standard], listed explicitly)
+websockets>=12.0
+
+# Starlette is a FastAPI dependency — listed for version pinning
+starlette>=0.37.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 7c: Optional — environment variable / .env file support
+# ─────────────────────────────────────────────────────────────────────────────
+# Used to load TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from a .env file
+# instead of having to export them manually in the shell.
+python-dotenv>=1.0.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Development / testing utilities (optional)
+# ─────────────────────────────────────────────────────────────────────────────
+# httpx is useful for async API testing (e.g. pytest against the FastAPI bridge)
+# httpx>=0.27.0
+#
+# pytest + pytest-asyncio for async endpoint tests
+# pytest>=8.0.0
+# pytest-asyncio>=0.23.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOT needed — removed from project (YOLO26 built-ins replace these):
+# ─────────────────────────────────────────────────────────────────────────────
+# norfair               — replaced by model.track() ByteTrack
+# boxmot                — replaced by model.track() ByteTrack
+# filterpy              — Kalman filter is built into ultralytics tracker
+# deep-sort-realtime    — replaced by model.track() ByteTrack
+# python-telegram-bot   — replaced by plain requests HTTP call
+# matplotlib            — replaced by OpenCV overlays
