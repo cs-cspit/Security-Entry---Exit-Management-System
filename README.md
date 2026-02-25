@@ -260,8 +260,8 @@ All data is persisted to `data/yolo26_complete_system.db`.
 
 ## Authors
 
-- **Ananya Gupta** — 23CS043
-- **Debdoot Manna** — 23CS023
+- **Ananya Gupta** — 23CS023
+- **Debdoot Manna** — 23CS043
 
 CSPIT / CSE / B1-C1
 ```
