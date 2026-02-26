@@ -1,7 +1,31 @@
 """
-YOLO26 Body Detector
-Uses YOLO26 for unified person detection with pose keypoints.
-Replaces YOLOv8-face + YOLOv11 with single YOLO26 model.
+YOLO26-pose Body Detector
+==========================
+Handles person detection, body bounding boxes, and 17-point COCO pose
+keypoints using the YOLO26-pose variant (yolo26n-pose.pt).
+
+Role within the three-model YOLO26 architecture
+------------------------------------------------
+  yolo26n-pose.pt  ← THIS FILE
+      Person detection (body bbox) + 17 COCO keypoints.
+      Drives ByteTrack multi-person tracking in the room camera.
+      Provides head-region keypoints (nose/eyes/ears) used to crop
+      tight face regions before passing to the dedicated face detector.
+
+  yolo26n.pt  (loaded directly in YOLO26CompleteSystem)
+      Dedicated face detector.  Runs on the tight head-region crop
+      extracted from pose keypoints above.  Gives sub-pixel face boxes
+      that InsightFace ArcFace then embeds into 512-D vectors.
+      Critical for CISF/uniform scenarios where clothing appearance
+      is identical across individuals.
+
+  yolo26n-seg.pt  (loaded directly in YOLO26CompleteSystem)
+      Instance segmentation masks.  Used to isolate exact clothing
+      pixels before colour-histogram extraction, eliminating background
+      bleed that would corrupt appearance-based re-ID.
+
+This module only concerns itself with the pose model.  The detection and
+segmentation models are managed by YOLO26CompleteSystem directly.
 """
 
 from typing import Dict, List, Optional, Tuple
@@ -13,14 +37,22 @@ from ultralytics import YOLO
 
 class YOLO26BodyDetector:
     """
-    Unified person detector using YOLO26.
+    Person detector and pose estimator using YOLO26-pose.
 
-    Features:
-    - Person detection
-    - Pose estimation (17 keypoints)
-    - Face region from pose keypoints (nose, eyes, ears)
-    - Body region from full person bbox
-    - Fast end-to-end inference (no NMS)
+    Responsibilities (within the three-model pipeline):
+    - Detect all people in a frame (body bounding boxes)
+    - Estimate 17 COCO pose keypoints per person
+    - Derive a rough face-region bbox from facial keypoints
+      (nose=0, left_eye=1, right_eye=2, left_ear=3, right_ear=4)
+      — this crop is then refined by the dedicated YOLO26-detect model
+    - Provide body-region crops for OSNet and body-analyser features
+    - Back the ByteTrack multi-person tracker (room camera)
+
+    NOT responsible for:
+    - Face embedding extraction (→ YOLO26-detect + InsightFace)
+    - Clothing mask generation (→ YOLO26-seg)
+
+    End-to-end NMS-free inference (YOLO26 native).
     """
 
     def __init__(

@@ -12,7 +12,7 @@ Modify these values to tune performance and behavior without changing the main c
 # ============================================================================
 
 # YOLO Model Configuration
-YOLO_MODEL_PATH = "yolov8n-face.pt"  # Options: yolov8n-face.pt, yolov8s-face.pt, yolov8m-face.pt, yolov11n.pt
+YOLO_MODEL_PATH = "yolo26n-pose.pt"  # YOLO26 unified detection model (pose + body + face via keypoints)
 DETECTION_CONFIDENCE_THRESHOLD = 0.8  # Minimum confidence score (0.0 to 1.0)
 # Lower = more detections, Higher = fewer false positives
 # Recommended: 0.6 (lenient) to 0.9 (strict)
@@ -196,8 +196,9 @@ PRINT_TIMING = False  # Print timing for each pipeline step
 # ADVANCED CONFIGURATION
 # ============================================================================
 
-# Face Detection Advanced
-YOLO_IOU_THRESHOLD = 0.45  # IoU threshold for NMS (Non-Maximum Suppression)
+# YOLO26 Detection Advanced
+# Note: YOLO26 is NMS-free (end-to-end detection), these are kept for compatibility
+YOLO_IOU_THRESHOLD = 0.45  # IoU threshold (legacy; YOLO26 does not use NMS)
 YOLO_MAX_DETECTIONS = 300  # Maximum detections per frame
 
 # Face Encoding Advanced

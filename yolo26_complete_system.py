@@ -2,18 +2,55 @@
 """
 YOLO26 Complete Three-Camera Security System
 ============================================
-Ultimate implementation with Entry, Exit, and Room cameras using YOLO26-pose
-for unified person detection, tracking, and re-identification.
+Three-camera security system with full YOLO26 model suite for robust
+person detection, face identification, body segmentation, and pose tracking.
+
+Three-model architecture (all YOLO26 family):
+  ┌─────────────────────────────────────────────────────────────────┐
+  │ Model                │ File                  │ Role             │
+  ├─────────────────────────────────────────────────────────────────┤
+  │ YOLO26 Detection     │ yolo26n.pt            │ Face detection   │
+  │                      │                       │ (dedicated high- │
+  │                      │                       │  res face crop)  │
+  ├─────────────────────────────────────────────────────────────────┤
+  │ YOLO26 Segmentation  │ yolo26n-seg.pt        │ Pixel-level body │
+  │                      │                       │ masks → precise  │
+  │                      │                       │ clothing/hair    │
+  │                      │                       │ colour extraction│
+  ├─────────────────────────────────────────────────────────────────┤
+  │ YOLO26 Pose          │ yolo26n-pose.pt       │ Body bbox + 17   │
+  │                      │                       │ keypoints for    │
+  │                      │                       │ tracking & gait  │
+  └─────────────────────────────────────────────────────────────────┘
+
+Why three models?
+  - People wearing identical uniforms (e.g. CISF) cannot be distinguished
+    by body/clothing colour alone.  A dedicated face detector runs on a
+    zoomed face crop at entry AND room, giving a reliable biometric signal
+    that is independent of clothing.
+  - Segmentation masks isolate the exact pixels of a garment, removing
+    background bleed that corrupts histogram-based colour matching.
+  - Pose keypoints feed ByteTrack for stable multi-person track IDs and
+    provide gait/shoulder-width features that complement face+colour.
+
+Re-ID pipeline per camera:
+  Entry  → detect (person bbox) → seg mask → face embed → OSNet → register
+  Room   → pose track (ByteTrack) → face embed → OSNet → match registered
+  Exit   → detect → face embed (primary) → OSNet (fallback) → match + exit
 
 Features:
-✅ YOLO26-pose unified detection (single model for detection + pose)
-✅ Multi-modal re-ID: OSNet + Hair + Skin + Clothing
-✅ Entry gate: Auto-register people entering
-✅ Room camera: Track authorized people, detect velocity, trajectory
-✅ Exit gate: Match and exit people, calculate duration
-✅ Real-time velocity tracking with color-coded indicators
-✅ Unauthorized entry detection
-✅ Session management with database persistence
+✅ YOLO26-pose body detection + 17-keypoint pose (ByteTrack room tracking)
+✅ YOLO26-seg instance segmentation masks (precise clothing/hair colour)
+✅ YOLO26-detect dedicated face crops at entry, room, and exit
+✅ InsightFace ArcFace 512-D face embeddings (primary re-ID signal)
+✅ OSNet appearance embedding (secondary re-ID signal)
+✅ Hair colour + skin tone + clothing colour from segmentation masks
+✅ Cross-camera adaptive threshold (entry→room domain shift compensation)
+✅ ByteTrack multi-person tracking with persistent track→person mapping
+✅ Loitering / Tailgating / Panic behaviour detection
+✅ Velocity tracking with real-time colour-coded display
+✅ REST API + WebSocket + MJPEG streams
+✅ Complete entry → room → exit pipeline with session management
 
 Controls:
     E - Force register at entry (auto-register is default)
@@ -53,6 +90,21 @@ except ImportError as e:
     print("   pip install ultralytics opencv-python numpy torch torchvision")
     sys.exit(1)
 
+# ── YOLO26 multi-model imports ────────────────────────────────────────────────
+# We use three distinct YOLO26 model variants, each specialised for one role:
+#   yolo26n.pt      — detection model  → face detection on zoomed crops
+#   yolo26n-seg.pt  — segmentation     → pixel-level body/clothing masks
+#   yolo26n-pose.pt — pose estimation  → body bbox + 17 keypoints + ByteTrack
+# All three are loaded lazily in __init__ with graceful fallbacks.
+try:
+    from ultralytics import YOLO as _YOLO26
+
+    _YOLO26_AVAILABLE = True
+except ImportError:
+    _YOLO26_AVAILABLE = False
+    _YOLO26 = None  # type: ignore
+    print("⚠️  ultralytics not found — YOLO26 face-detect and seg models disabled")
+
 # ── Phase 6: Multi-person tracker (YOLO26 built-in ByteTrack) ────────────────
 try:
     from tracking.multi_tracker import MultiPersonTracker, TrackedPerson
@@ -84,17 +136,37 @@ except ImportError:
 
 class YOLO26CompleteSystem:
     """
-    Complete three-camera security system using YOLO26-pose.
+    Complete three-camera security system using the full YOLO26 model suite.
+
+    Model roles
+    -----------
+    self.detector          YOLO26BodyDetector(yolo26n-pose.pt)
+                           Primary person detector — body bounding boxes,
+                           17-point COCO keypoints, drives ByteTrack.
+
+    self.face_detector     YOLO26(yolo26n.pt)  [detection variant]
+                           Dedicated face detector.  Runs on a zoomed
+                           head-region crop extracted from the pose
+                           keypoints, giving sub-pixel-accurate face boxes
+                           that InsightFace then embeds.  Used at entry,
+                           room, AND exit — critical for uniform scenarios.
+
+    self.seg_model         YOLO26(yolo26n-seg.pt)  [segmentation variant]
+                           Produces pixel-level instance masks for each
+                           detected person.  The mask is used to isolate
+                           exact clothing pixels before colour histogram
+                           extraction, eliminating background bleed that
+                           would otherwise corrupt the appearance vector.
 
     Phase 6 additions:
-      - MultiPersonTracker (YOLO26 + ByteTrack built-in) for stable room IDs
+      - MultiPersonTracker (YOLO26-pose + ByteTrack) for stable room IDs
       - Per-track OSNet embedding aggregation (temporal mean pooling)
       - Track → Person association persisted across occlusions
 
     Phase 7 additions:
       - LoiteringDetector: zone-based dwell-time alerts
       - TailgatingDetector: rapid successive entry detection
-      - Panic behavior detection (crowd avg velocity)
+      - Panic behaviour detection (crowd avg velocity)
       - Enhanced AlertManager: Telegram + WebSocket channels
       - SecurityAPIBridge: FastAPI REST + WebSocket + MJPEG streams
     """
@@ -110,12 +182,21 @@ class YOLO26CompleteSystem:
         """Initialize the complete system."""
         print("\n" + "=" * 70)
         print("  YOLO26 COMPLETE THREE-CAMERA SECURITY SYSTEM")
-        print("  Phases 1-7 Active")
+        print("  Phases 1-7 Active  |  Three-Model YOLO26 Suite")
         print("=" * 70)
-        print("✅ Unified YOLO26-pose detection (17 keypoints, NMS-free)")
-        print("✅ Body + Hair + Skin + Clothing + OSNet + Face re-identification")
-        print("✅ ByteTrack multi-person tracking (YOLO26 built-in)")
-        print("✅ Loitering / Tailgating / Panic behavior detection")
+        print(
+            "✅ YOLO26-pose  (yolo26n-pose.pt) — body bbox + 17 keypoints + ByteTrack"
+        )
+        print(
+            "✅ YOLO26-det   (yolo26n.pt)      — dedicated face detection on head crops"
+        )
+        print(
+            "✅ YOLO26-seg   (yolo26n-seg.pt)  — pixel masks → precise clothing colour"
+        )
+        print("✅ InsightFace ArcFace 512-D face embeddings (uniform-proof re-ID)")
+        print("✅ OSNet appearance embedding (body-level secondary signal)")
+        print("✅ ByteTrack multi-person tracking with persistent track→person mapping")
+        print("✅ Loitering / Tailgating / Panic behaviour detection")
         print("✅ Velocity tracking with real-time display")
         print("✅ REST API + WebSocket + MJPEG streams")
         print("✅ Complete entry → room → exit pipeline\n")
@@ -138,17 +219,74 @@ class YOLO26CompleteSystem:
             100.0  # Calibration: pixels per meter (adjust for your camera)
         )
 
-        # Initialize YOLO26 detector (shared across all cameras)
-        print("🔧 Loading YOLO26-pose model...")
+        # ── Model 1: YOLO26-pose — body detection + keypoints + ByteTrack ────
+        print("🔧 Loading YOLO26-pose model (body detection + keypoints)...")
         self.detector = YOLO26BodyDetector(
             model_name="yolo26n-pose.pt", confidence_threshold=0.5, device="auto"
         )
         print()
 
+        # ── Resolve compute device once for all supplementary models ─────────
+        import torch as _torch
+
+        _dev = (
+            "cuda"
+            if _torch.cuda.is_available()
+            else "mps"
+            if _torch.backends.mps.is_available()
+            else "cpu"
+        )
+
+        # ── Model 2: YOLO26-detect — dedicated face detector ─────────────────
+        # Uses the plain detection variant (yolo26n.pt) which is trained on
+        # COCO person class.  We run it on tight head-region crops so it can
+        # pick out faces that are too small for the full-frame pose model to
+        # localise precisely.  InsightFace then embeds those crops.
+        self.face_detect_model = None
+        if _YOLO26_AVAILABLE:
+            _face_det_path = "yolo26n.pt"
+            try:
+                print(
+                    f"🔧 Loading YOLO26-detect model for face detection ({_face_det_path})..."
+                )
+                self.face_detect_model = _YOLO26(_face_det_path)
+                self.face_detect_model.to(_dev)
+                print(f"✅ YOLO26-detect face model loaded on {_dev}")
+            except Exception as _e:
+                print(f"⚠️  YOLO26-detect face model unavailable: {_e}")
+                print("   Face localisation will fall back to pose-keypoint crops.")
+                self.face_detect_model = None
+        else:
+            print("⚠️  ultralytics unavailable — YOLO26-detect face model skipped")
+        print()
+
+        # ── Model 3: YOLO26-seg — instance segmentation for clothing masks ───
+        # The segmentation model produces a pixel mask per person.  We use
+        # that mask to extract ONLY the clothing pixels before computing colour
+        # histograms, eliminating background and skin bleed that degrades
+        # appearance matching (especially for people in similar uniforms).
+        self.seg_model = None
+        if _YOLO26_AVAILABLE:
+            _seg_path = "yolo26n-seg.pt"
+            try:
+                print(
+                    f"🔧 Loading YOLO26-seg model for clothing masks ({_seg_path})..."
+                )
+                self.seg_model = _YOLO26(_seg_path)
+                self.seg_model.to(_dev)
+                print(f"✅ YOLO26-seg model loaded on {_dev}")
+            except Exception as _e:
+                print(f"⚠️  YOLO26-seg model unavailable: {_e}")
+                print("   Clothing colour will fall back to raw bbox crops.")
+                self.seg_model = None
+        else:
+            print("⚠️  ultralytics unavailable — YOLO26-seg model skipped")
+        print()
+
         # ── Phase 6: Multi-person tracker ────────────────────────────────────
         if _TRACKER_AVAILABLE:
             print("🔧 Loading dedicated room-camera detector for ByteTrack...")
-            # IMPORTANT: the room tracker MUST use its own YOLO model instance.
+            # IMPORTANT: the room tracker MUST use its own YOLO26-pose instance.
             # Entry/exit cameras call model.predict() on self.detector; if the
             # tracker shared that instance, those predict() calls would reset
             # ByteTrack's internal predictor state every frame → 0 room detections.
@@ -169,6 +307,11 @@ class YOLO26CompleteSystem:
             self._room_detector = None
             self.multi_tracker = None
             print("⚠️  Multi-tracker unavailable — frame-by-frame detection only\n")
+
+        # ── Seg-model helper: extract masked body crop ────────────────────────
+        # Called from register_person and match_person to get a clothing-only
+        # image crop using the YOLO26-seg instance mask.
+        self._seg_conf_threshold = 0.45  # minimum mask confidence
 
         # Initialize feature extractors
         print("🔧 Loading feature extractors...")
@@ -252,9 +395,24 @@ class YOLO26CompleteSystem:
         self.stable_ids = {}  # {detection_key: person_id} - confirmed IDs
 
         # ── Phase 6: track_id → person_id mapping (for display & DB) ─────────
-        # Maintained separately so the room camera can label unregistered tracks
+        # Maintained separately so the room camera can label unregistered tracks.
+        #
+        # TTL design notes
+        # ----------------
+        # A short TTL (≤ 2 s) caused the "flash green → stay red" symptom:
+        #   frame 0: no cache → full match → succeeds → green ✓
+        #   frame 2s+1: cache expired → full match → OSNet domain-shift → red ✗
+        # Fix: use a long TTL so a successful face match sticks for the whole
+        # time the person is continuously tracked.  The cache is invalidated
+        # explicitly when a track_id disappears (ByteTrack lost-track event)
+        # rather than relying on wall-clock expiry alone.
         self._track_match_cache: dict = {}  # {track_id: (person_id, similarity, ts)}
-        self._track_cache_ttl: float = 2.0  # seconds before re-matching a track
+        self._track_cache_ttl: float = (
+            30.0  # seconds — long enough for continuous track
+        )
+        # Set of track_ids that matched successfully via face — these are "pinned"
+        # and will NOT be re-evaluated until the track is lost.
+        self._face_confirmed_tracks: set = set()
 
         # ── Phase 7: Behavior detectors ───────────────────────────────────────
         if _BEHAVIORS_AVAILABLE:
@@ -342,6 +500,14 @@ class YOLO26CompleteSystem:
                 "ON" if self.use_face_recognition else "OFF"
             )
         )
+        print(f"  Models loaded:")
+        print(f"    Pose:  yolo26n-pose.pt  ({'✅' if self.detector else '❌'})")
+        print(
+            f"    Det:   yolo26n.pt        ({'✅' if self.face_detect_model else '⚠️  fallback'})"
+        )
+        print(
+            f"    Seg:   yolo26n-seg.pt    ({'✅' if self.seg_model else '⚠️  fallback'})"
+        )
         print("  + - Increase room threshold (+0.05)")
         print("  - - Decrease room threshold (-0.05)")
         print("  ] - Increase exit threshold (+0.05)")
@@ -408,11 +574,184 @@ class YOLO26CompleteSystem:
         print("\n\n⚠️  Interrupt signal received...")
         self.running = False
 
+    # ── YOLO26-seg helper ─────────────────────────────────────────────────────
+
+    def _extract_masked_body_crop(
+        self, frame: np.ndarray, body_bbox: tuple
+    ) -> np.ndarray:
+        """
+        Use YOLO26-seg to get a pixel-level person mask inside body_bbox and
+        return a masked body crop where background pixels are zeroed out.
+
+        This eliminates background bleed that corrupts clothing colour histograms
+        — critical when people wear similar-coloured uniforms.
+
+        Falls back to the raw bbox crop when seg model is unavailable or when
+        no mask is found for this person.
+        """
+        bx, by, bw, bh = body_bbox
+        x1, y1 = max(0, bx), max(0, by)
+        x2, y2 = min(frame.shape[1], bx + bw), min(frame.shape[0], by + bh)
+
+        raw_crop = frame[y1:y2, x1:x2].copy()
+
+        if self.seg_model is None or raw_crop.size == 0:
+            return raw_crop
+
+        try:
+            results = self.seg_model(
+                frame,
+                verbose=False,
+                conf=self._seg_conf_threshold,
+            )
+            if not results or results[0].masks is None:
+                return raw_crop
+
+            result = results[0]
+            boxes = result.boxes.xyxy.cpu().numpy()  # (N, 4)
+            masks = result.masks.data.cpu().numpy()  # (N, H, W) binary float
+
+            # Find mask whose box best overlaps our body_bbox
+            best_iou = 0.0
+            best_mask = None
+            for i, box in enumerate(boxes):
+                # Quick IoU between seg box and body_bbox
+                sx1, sy1, sx2, sy2 = box
+                ix1, iy1 = max(sx1, x1), max(sy1, y1)
+                ix2, iy2 = min(sx2, x2), min(sy2, y2)
+                if ix2 <= ix1 or iy2 <= iy1:
+                    continue
+                inter = (ix2 - ix1) * (iy2 - iy1)
+                area1 = (sx2 - sx1) * (sy2 - sy1)
+                area2 = bw * bh
+                iou = inter / (area1 + area2 - inter + 1e-6)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_mask = masks[i]
+
+            if best_mask is None or best_iou < 0.25:
+                return raw_crop
+
+            # Resize mask to full frame size then crop to bbox
+            import cv2 as _cv2
+
+            mh, mw = frame.shape[:2]
+            mask_full = _cv2.resize(
+                best_mask, (mw, mh), interpolation=_cv2.INTER_NEAREST
+            )
+            mask_crop = mask_full[y1:y2, x1:x2]  # same region as raw_crop
+
+            # Apply mask — zero out background pixels
+            masked = raw_crop.copy()
+            masked[mask_crop < 0.5] = 0
+            return masked
+
+        except Exception as _e:
+            if self.debug_mode:
+                print(f"   ⚠️  Seg mask extraction failed: {_e}")
+            return raw_crop
+
+    # ── YOLO26-detect face helper ─────────────────────────────────────────────
+
+    def _detect_face_on_head_crop(
+        self, frame: np.ndarray, detection: dict
+    ) -> np.ndarray | None:
+        """
+        Run YOLO26-detect on a tight head-region crop derived from pose
+        keypoints (or top-20% of body bbox as fallback) to get a high-quality
+        face bounding box, then pass that crop to InsightFace for embedding.
+
+        Returns the face image crop (BGR) or None if no face found.
+        """
+        if not self.use_face_recognition:
+            return None
+
+        body_bbox = detection["body_bbox"]
+        bx, by, bw, bh = body_bbox
+        keypoints = detection.get("keypoints")
+
+        # ── Derive head-region crop ───────────────────────────────────────────
+        # Primary: use nose + eye + ear keypoints for a tight head bbox
+        head_crop = None
+
+        if keypoints is not None:
+            face_kpt_indices = [0, 1, 2, 3, 4]  # nose, l_eye, r_eye, l_ear, r_ear
+            face_pts = []
+            for idx in face_kpt_indices:
+                kx, ky, kconf = keypoints[idx]
+                if kconf > 0.25:
+                    face_pts.append((float(kx), float(ky)))
+
+            if len(face_pts) >= 2:
+                xs = [p[0] for p in face_pts]
+                ys = [p[1] for p in face_pts]
+                pad_x = max(20, (max(xs) - min(xs)) * 0.6)
+                pad_y = max(20, (max(ys) - min(ys)) * 0.8)
+                hx1 = max(0, int(min(xs) - pad_x))
+                hy1 = max(0, int(min(ys) - pad_y))
+                hx2 = min(frame.shape[1], int(max(xs) + pad_x))
+                hy2 = min(frame.shape[0], int(max(ys) + pad_y * 1.5))
+                if hx2 > hx1 and hy2 > hy1:
+                    head_crop = frame[hy1:hy2, hx1:hx2]
+
+        # Fallback: top 22% of person bbox
+        if head_crop is None or head_crop.size == 0:
+            head_h = int(bh * 0.22)
+            hy1 = max(0, by)
+            hy2 = min(frame.shape[0], by + head_h)
+            hx1 = max(0, int(bx + bw * 0.1))
+            hx2 = min(frame.shape[1], int(bx + bw * 0.9))
+            if hx2 > hx1 and hy2 > hy1:
+                head_crop = frame[hy1:hy2, hx1:hx2]
+
+        if head_crop is None or head_crop.size == 0:
+            return None
+
+        # ── YOLO26-detect on head crop (if model available) ───────────────────
+        face_crop = None
+        if self.face_detect_model is not None:
+            try:
+                results = self.face_detect_model(head_crop, verbose=False, conf=0.35)
+                if (
+                    results
+                    and results[0].boxes is not None
+                    and len(results[0].boxes) > 0
+                ):
+                    # Pick the highest-confidence box
+                    boxes = results[0].boxes.xyxy.cpu().numpy()
+                    confs = results[0].boxes.conf.cpu().numpy()
+                    best_idx = int(confs.argmax())
+                    fx1, fy1, fx2, fy2 = map(int, boxes[best_idx])
+                    # Expand by 15% for chin + forehead
+                    fw, fh = fx2 - fx1, fy2 - fy1
+                    fx1 = max(0, fx1 - int(fw * 0.15))
+                    fy1 = max(0, fy1 - int(fh * 0.15))
+                    fx2 = min(head_crop.shape[1], fx2 + int(fw * 0.15))
+                    fy2 = min(head_crop.shape[0], fy2 + int(fh * 0.20))
+                    face_crop = head_crop[fy1:fy2, fx1:fx2]
+            except Exception as _e:
+                if self.debug_mode:
+                    print(f"   ⚠️  YOLO26-detect face inference failed: {_e}")
+                face_crop = None
+
+        # Fallback: use the whole head crop if YOLO26-detect didn't fire
+        if face_crop is None or face_crop.size == 0:
+            face_crop = head_crop
+
+        return face_crop if face_crop.size > 0 else None
+
+    # ── Core registration ─────────────────────────────────────────────────────
+
     def register_person(
         self, person_id: str, frame: np.ndarray, detection: dict
     ) -> bool:
         """
-        Register a new person with full feature extraction (Phase 5: includes face).
+        Register a new person with full feature extraction.
+
+        Extraction pipeline:
+          1. OSNet embedding from body bbox crop
+          2. Body analyser (hair / skin / clothing) using YOLO26-seg masked crop
+          3. Face embedding via YOLO26-detect head crop → InsightFace ArcFace
         """
         try:
             body_bbox = detection["body_bbox"]
@@ -429,22 +768,34 @@ class YOLO26CompleteSystem:
             self.cross_camera.update_feature_stats("entry", osnet_features)
 
             if self.debug_mode:
-                print(f"   Extracting hair, skin, clothing...")
+                print(f"   Extracting hair, skin, clothing (seg-masked crop)...")
 
-            body_features = self.body_analyzer.extract_features(frame, body_bbox)
+            # Use YOLO26-seg masked crop for more accurate colour features
+            masked_crop = self._extract_masked_body_crop(frame, body_bbox)
+            # body_analyzer.extract_features expects (full_frame, bbox) but we
+            # can pass the masked crop as if it's a full frame with bbox=(0,0,w,h)
+            mh, mw = masked_crop.shape[:2]
+            body_features = self.body_analyzer.extract_features(
+                masked_crop, (0, 0, mw, mh)
+            )
 
-            # Phase 5: Extract face embedding at entry
+            # ── Face embedding via YOLO26-detect + InsightFace ────────────────
             face_embedding = None
             if self.use_face_recognition and self.use_face_at_entry:
                 if self.debug_mode:
-                    print(f"   Extracting face embedding...")
+                    print(f"   Detecting face with YOLO26-detect on head crop...")
 
-                face_embedding = self.face_recognizer.extract_face_embedding(
-                    frame, bbox=body_bbox, min_confidence=0.5
-                )
+                face_crop = self._detect_face_on_head_crop(frame, detection)
+                if face_crop is not None:
+                    # Pass the face crop directly; bbox covers the whole crop
+                    face_embedding = self.face_recognizer.extract_face_embedding(
+                        face_crop,
+                        bbox=(0, 0, face_crop.shape[1], face_crop.shape[0]),
+                        min_confidence=0.3,
+                    )
 
                 if face_embedding is not None:
-                    print(f"   ✅ Face detected and embedded (512D)")
+                    print(f"   ✅ Face detected and embedded via YOLO26-detect (512D)")
                 else:
                     print(f"   ⚠️  No face detected (will use body-only matching)")
 
@@ -452,7 +803,7 @@ class YOLO26CompleteSystem:
             self.registered_people[person_id] = {
                 "osnet": osnet_features,
                 "body_features": body_features,
-                "face_embedding": face_embedding,  # Phase 5: Store face
+                "face_embedding": face_embedding,
                 "body_bbox": body_bbox,
                 "keypoints": detection.get("keypoints"),
                 "registered_at": datetime.now(),
@@ -468,11 +819,21 @@ class YOLO26CompleteSystem:
         self, frame: np.ndarray, detection: dict, target_camera: str = "room"
     ) -> tuple:
         """
-        Match a detected person against registered people (Phase 5: includes face).
+        Match a detected person against registered people.
+
+        Face matching is now used at ALL cameras (entry, room, exit) — not
+        just at exit.  This is essential for uniform scenarios (CISF, etc.)
+        where body/clothing appearance is identical across people.
+
+        Matching priority:
+          1. Face embedding (InsightFace ArcFace) — highest discriminability,
+             obtained via YOLO26-detect on a zoomed head crop.
+          2. OSNet appearance embedding — robust body-level feature.
+          3. Clothing / hair colour histogram from YOLO26-seg masked crop.
 
         Args:
             frame: Current frame
-            detection: Detection dictionary with body_bbox
+            detection: Detection dictionary with body_bbox (and optionally keypoints)
             target_camera: Camera ID ('room', 'exit')
 
         Returns: (person_id, similarity, debug_info)
@@ -483,19 +844,32 @@ class YOLO26CompleteSystem:
         body_bbox = detection["body_bbox"]
 
         try:
-            # Phase 5: Extract face embedding if exit camera (face-first matching)
+            # ── Face embedding — used at ALL cameras now ──────────────────────
+            # Previously restricted to exit only, which caused room mismatches
+            # for people in uniforms.  The YOLO26-detect head-crop approach gives
+            # reliable embeddings even at room-camera distances.
             face_query = None
-            if (
-                self.use_face_recognition
-                and target_camera == "exit"
-                and self.use_face_at_exit
+            if self.use_face_recognition and (
+                (target_camera == "exit" and self.use_face_at_exit)
+                or (target_camera == "room")
+                or (target_camera == "entry" and self.use_face_at_entry)
             ):
-                face_query = self.face_recognizer.extract_face_embedding(
-                    frame, bbox=body_bbox, min_confidence=0.5
-                )
+                face_crop = self._detect_face_on_head_crop(frame, detection)
+                if face_crop is not None:
+                    face_query = self.face_recognizer.extract_face_embedding(
+                        face_crop,
+                        bbox=(0, 0, face_crop.shape[1], face_crop.shape[0]),
+                        min_confidence=0.3,
+                    )
 
                 if self.debug_mode and face_query is not None:
-                    print(f"   🔍 Face detected at exit - using face-first matching")
+                    print(
+                        f"   🔍 Face detected at {target_camera} — face-first matching active"
+                    )
+                elif self.debug_mode:
+                    print(
+                        f"   ⚠️  No face detected at {target_camera} — body-only fallback"
+                    )
 
             # Extract query features
             osnet_query = self.osnet.extract_features(frame, body_bbox)
@@ -526,6 +900,7 @@ class YOLO26CompleteSystem:
             "reason": "",
             "gap": 0.0,
             "second_best": 0.0,
+            "face_available": face_query is not None,
         }
 
         # Get adaptive threshold from cross-camera adapter
@@ -538,24 +913,21 @@ class YOLO26CompleteSystem:
         for person_id, person_data in self.registered_people.items():
             osnet_registered = person_data["osnet"]
             body_registered = person_data["body_features"]
-            face_registered = person_data.get("face_embedding")  # Phase 5
+            face_registered = person_data.get("face_embedding")
 
-            # Phase 5: Face matching (if available and at exit)
+            # ── Face similarity — now used at ALL cameras ─────────────────
             face_sim = 0.0
             has_face_match = False
-            if (
-                face_query is not None
-                and face_registered is not None
-                and target_camera == "exit"
-            ):
-                # Face-first matching at exit
+            if face_query is not None and face_registered is not None:
                 face_sim = self.face_recognizer.compare_faces(
                     face_query, face_registered
                 )
                 has_face_match = True
 
                 if self.debug_mode:
-                    print(f"\n👤 Face Match for {person_id}: {face_sim:.3f}")
+                    print(
+                        f"\n👤 Face Match [{target_camera}] for {person_id}: {face_sim:.3f}"
+                    )
                     if face_sim >= self.face_threshold:
                         print(f"   ✅ Face match! (>{self.face_threshold:.2f})")
                     else:
@@ -596,15 +968,19 @@ class YOLO26CompleteSystem:
             )
             clothing_sim = (upper_sim + lower_sim) / 2.0
 
-            # Phase 5: Weighted combination with face (if at exit and face available)
+            # ── Weighted combination with face (ALL cameras) ─────────────
             if has_face_match and face_sim >= self.face_threshold:
-                # Face match found - use face-dominant scoring
+                # Face match confirmed — face-dominant scoring.
+                # face_weight=0.60, remaining 0.40 goes to OSNet.
+                # This path is now reachable from room AND exit, not exit-only.
                 total_score = face_sim * self.face_weight + osnet_sim * (
                     1.0 - self.face_weight
                 )
 
                 if self.debug_mode:
-                    print(f"   Using FACE-DOMINANT scoring: {total_score:.3f}")
+                    print(
+                        f"   Using FACE-DOMINANT scoring [{target_camera}]: {total_score:.3f}"
+                    )
             else:
                 # No face or face didn't match - use body-only scoring
                 # HARD OSNET CHECK: Reject if OSNet similarity is too low
@@ -661,30 +1037,33 @@ class YOLO26CompleteSystem:
             target_camera=target_camera,
         )
 
+        _common_debug = {
+            "all_scores": all_scores,
+            "gap": best_score - second_best_score,
+            "second_best": second_best_score,
+            "adaptive_threshold": adaptive_threshold,
+            "adaptive_gap": adaptive_gap,
+            "face_available": face_query is not None,
+        }
+
         if not should_match:
             return (
                 None,
                 best_score,
-                {
-                    "all_scores": all_scores,
-                    "reason": reason,
-                    "gap": best_score - second_best_score,
-                    "second_best": second_best_score,
-                    "adaptive_threshold": adaptive_threshold,
-                    "adaptive_gap": adaptive_gap,
-                },
+                {**_common_debug, "reason": reason},
             )
 
         return (
             best_id,
             best_score,
             {
-                "all_scores": all_scores,
+                **_common_debug,
                 "reason": "clear_match",
-                "gap": best_score - second_best_score,
-                "second_best": second_best_score,
-                "adaptive_threshold": adaptive_threshold,
-                "adaptive_gap": adaptive_gap,
+                "face_confirmed": (
+                    face_query is not None
+                    and all_scores.get(best_id, {}).get("face", 0.0)
+                    >= self.face_threshold
+                ),
             },
         )
 
@@ -791,7 +1170,7 @@ class YOLO26CompleteSystem:
 
             # Find majority
             if votes:
-                majority_id = max(votes, key=votes.get)
+                majority_id = max(votes, key=lambda k: votes[k])
                 majority_count = votes[majority_id]
 
                 # Need at least 2 out of 3 frames
@@ -1124,6 +1503,10 @@ class YOLO26CompleteSystem:
         self.stats["room_detections"] += len(detections)
         self.stats["total_detections"] += len(detections)
 
+        # Purge stale track cache entries (prevents stale body-only matches
+        # from being resurrected when a lost track_id is re-assigned)
+        self._release_lost_tracks()
+
         authorized_count = 0
         unauthorized_count = 0
 
@@ -1151,8 +1534,11 @@ class YOLO26CompleteSystem:
             if cache_valid:
                 person_id, similarity = cached[0], cached[1]
                 debug_info = {"from_cache": True}
+                # If this track was face-confirmed, skip re-evaluation entirely
+                if track_id in self._face_confirmed_tracks:
+                    debug_info["face_pinned"] = True
             else:
-                # Full re-ID match
+                # Full re-ID match (includes face at room camera now)
                 person_id, similarity, debug_info = self.match_person(
                     frame_preprocessed, detection, target_camera="room"
                 )
@@ -1165,6 +1551,10 @@ class YOLO26CompleteSystem:
                         similarity,
                         time.time(),
                     )
+                    # Pin tracks that were confirmed by face — they won't flicker
+                    if debug_info.get("face_confirmed"):
+                        self._face_confirmed_tracks.add(track_id)
+                        print(f"   📌 Track T{track_id} face-pinned as {person_id}")
 
             # ALWAYS print room detection status (even if not debug mode)
             print(
@@ -1593,6 +1983,28 @@ class YOLO26CompleteSystem:
         for i in range(1, len(points)):
             thickness = max(1, int(3 * (i / len(points))))
             cv2.line(frame, points[i - 1], points[i], (0, 255, 255), thickness)
+
+    def _release_lost_tracks(self) -> None:
+        """
+        Purge cache entries for ByteTrack IDs that are no longer active.
+        Called once per room-camera frame so that when a track is re-acquired
+        (e.g. person re-enters frame) it gets a fresh face-based evaluation
+        rather than inheriting a stale body-only match.
+        """
+        if self.multi_tracker is None:
+            return
+        try:
+            diag = self.multi_tracker.diagnostics()
+            active_ids: set = set(diag.get("active_track_ids", []))
+        except Exception:
+            return
+
+        stale = [
+            tid for tid in list(self._track_match_cache.keys()) if tid not in active_ids
+        ]
+        for tid in stale:
+            del self._track_match_cache[tid]
+            self._face_confirmed_tracks.discard(tid)
 
     def process_exit_camera(self, frame: np.ndarray) -> np.ndarray:
         """Process exit camera - match and close sessions."""

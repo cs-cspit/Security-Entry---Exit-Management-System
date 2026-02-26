@@ -1,7 +1,7 @@
 #!/bin/bash
 
 echo "============================================================"
-echo "YOLO-BASED SECURITY SYSTEM INSTALLATION"
+echo "YOLO26-BASED SECURITY SYSTEM INSTALLATION"
 echo "============================================================"
 echo ""
 
@@ -75,18 +75,19 @@ echo ""
 # Create a test script to download models
 cat > /tmp/download_models.py << 'EOF'
 #!/usr/bin/env python3
-"""Download YOLO models."""
+"""Download YOLO26 model (unified detection + pose)."""
 import sys
 try:
     from ultralytics import YOLO
 
-    print("📥 Downloading YOLOv8n-face model...")
-    print("   (This will auto-download on first use)")
-    print("   Estimated size: ~6 MB")
-
-    print("\n📥 Downloading YOLOv11n model...")
-    model = YOLO("yolo11n.pt")
-    print("✅ YOLOv11n model downloaded successfully!")
+    print("📥 Downloading YOLO26n-pose model (unified body + face + pose)...")
+    print("   This is the single model used for ALL detection tasks:")
+    print("   - Person / body detection")
+    print("   - Face localisation (via pose keypoints)")
+    print("   - Pose estimation (17 COCO keypoints)")
+    print("   - Hair / clothing / body re-ID features")
+    model = YOLO("yolo26n-pose.pt")
+    print("✅ YOLO26n-pose model ready!")
 
     print("\n✅ All models ready!")
 
@@ -149,13 +150,14 @@ echo "============================================================"
 echo "INSTALLATION COMPLETE!"
 echo "============================================================"
 echo ""
-echo "🎉 You're ready to use the YOLO-based system!"
+echo "🎉 You're ready to use the YOLO26-based system!"
 echo ""
 echo "To run the system:"
-echo "  python demo_yolo_cameras.py"
+echo "  python yolo26_complete_system.py"
 echo ""
 echo "📚 For more information, see:"
-echo "  - CRITICAL_FIX_AND_YOLO_UPGRADE.md"
+echo "  - README.md"
+echo "  - FRONTEND_INTEGRATION.md"
 echo "  - requirements_yolo.txt"
 echo ""
 echo "============================================================"

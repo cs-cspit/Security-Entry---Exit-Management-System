@@ -351,6 +351,10 @@ class MultiPersonTracker:
             "lost_tracks": len(self._lost_ids),
             "total_tracks": len(self._tracks),
             "person_map": dict(self._person_to_track),
+            # Set of currently-active ByteTrack IDs — used by
+            # YOLO26CompleteSystem._release_lost_tracks() to purge stale
+            # track-match cache entries when a track disappears.
+            "active_track_ids": set(self._active_ids),
         }
 
     def reset(self):
