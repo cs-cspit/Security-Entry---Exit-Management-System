@@ -2,15 +2,20 @@
 """
 YOLO26 Face Detector Module
 ============================
-Detects faces using YOLO26-pose model.
+Detects faces using a two-stage pipeline:
 
-Previously used YOLOv8-face (yolov8n-face.pt) — now migrated to YOLO26.
+  1. YOLO26-pose (yolo26n-pose.pt) — person detection + 17 COCO keypoints
+  2. YOLO26-face (yolo26n-face.pt) — **custom-trained** dedicated face
+     detector that runs on tight head-region crops derived from stage 1.
+     Outputs class 0 = "face".  Dramatically reduces false positives
+     compared to the old generic COCO detector (yolo26n.pt) which could
+     only detect "person" class and wasn't designed for face localisation.
 
-Strategy:
-  - Run YOLO26-pose inference on the frame (same model used for body detection)
-  - Extract face bounding boxes from pose keypoints (nose, eyes, ears)
-  - This gives a single unified model for both face AND body detection
-  - No separate face model file required
+When the custom face model is not available, falls back to deriving face
+bounding boxes from pose keypoints (nose, eyes, ears) — the original
+single-model strategy.
+
+Previously used YOLOv8-face (yolov8n-face.pt) — fully migrated to YOLO26.
 
 Drop-in replacement: the public API (detect / extract_face_features /
 compare_features / visualize_detections) is identical to the old
@@ -27,12 +32,18 @@ import numpy as np
 
 class YOLO26FaceDetector:
     """
-    YOLO26-pose based face detector.
+    YOLO26-based face detector with custom-trained face model support.
 
-    Uses YOLO26-pose (yolo26n-pose.pt) to detect people, then derives face
-    bounding boxes from the 5 facial keypoints (nose, left/right eye,
-    left/right ear).  This replaces the old YOLOv8-face pipeline with a
-    single unified model that also provides body and pose information.
+    Two-stage pipeline (when custom face model is available):
+      1. YOLO26-pose (yolo26n-pose.pt) → person bboxes + 17 COCO keypoints
+      2. YOLO26-face (yolo26n-face.pt, custom-trained) → precise face bbox
+         from tight head-region crop derived from keypoints in stage 1.
+         The custom model outputs class 0 = "face" and is far more accurate
+         for face localisation than the generic COCO detector.
+
+    Single-stage fallback (when custom face model is absent):
+      - Derives face bounding boxes from the 5 facial keypoints
+        (nose, left/right eye, left/right ear) of the pose model.
 
     Public API is identical to the legacy YOLOv8FaceDetector so all existing
     callers continue to work without modification.
@@ -101,7 +112,7 @@ class YOLO26FaceDetector:
 
             self.model = YOLO(model_path)
             self.model.to(self.device)
-            print(f"✅ YOLO26 face detector loaded — model: {model_path}")
+            print(f"✅ YOLO26 pose model loaded — model: {model_path}")
 
         except ImportError:
             raise ImportError(
@@ -120,6 +131,134 @@ class YOLO26FaceDetector:
         # Padding multiplier applied to the raw keypoint bbox
         self._BBOX_EXPANSION = 0.35
 
+        # ── Custom YOLO26-face model (dedicated face detector) ────────────
+        # Load the custom-trained face model for precise face localisation.
+        # This model outputs class 0 = "face" and dramatically reduces
+        # false positives compared to keypoint-only face derivation.
+        self._face_model = None
+        self._face_model_is_custom = False
+        self._load_custom_face_model()
+
+    def _load_custom_face_model(self) -> None:
+        """
+        Attempt to load the custom-trained YOLO26-face model.
+
+        Fallback chain:
+          1. yolo26n-face.pt (project root — preferred)
+          2. custom_models/yolo26_face_results/weights/best.pt (source weights)
+        """
+        _candidates = [
+            "yolo26n-face.pt",
+            os.path.join("custom_models", "yolo26_face_results", "weights", "best.pt"),
+        ]
+        for _path in _candidates:
+            if not os.path.exists(_path):
+                continue
+            try:
+                from ultralytics import YOLO
+
+                self._face_model = YOLO(_path)
+                self._face_model.to(self.device)
+                self._face_model_is_custom = True
+                print(f"✅ Custom YOLO26-face model loaded: {_path}")
+                print(f"   Outputs class 0 = 'face' for precise face localisation")
+                return
+            except Exception as exc:
+                print(f"⚠️  Failed to load custom face model {_path}: {exc}")
+                continue
+
+        print(
+            "ℹ️  Custom YOLO26-face model not found — using keypoint-derived face boxes"
+        )
+
+    def _run_face_model_on_head_crop(
+        self,
+        frame: np.ndarray,
+        head_crop: np.ndarray,
+        crop_origin: Tuple[int, int],
+    ) -> Optional[Tuple[int, int, int, int, float]]:
+        """
+        Run the custom YOLO26-face model on a head-region crop and return
+        the best face bbox in full-frame coordinates.
+
+        Args:
+            frame: Original full frame (for bounds checking).
+            head_crop: Cropped head region (BGR).
+            crop_origin: (x_offset, y_offset) of the crop within frame.
+
+        Returns:
+            (x, y, w, h, confidence) in full-frame coords, or None.
+        """
+        if self._face_model is None or head_crop.size == 0:
+            return None
+
+        hch, hcw = head_crop.shape[:2]
+
+        # Upscale tiny crops — the face model was trained at 640px
+        _min_dim = 80
+        if hch < _min_dim or hcw < _min_dim:
+            _scale = max(_min_dim / hch, _min_dim / hcw)
+            head_crop_scaled = cv2.resize(
+                head_crop,
+                (int(hcw * _scale), int(hch * _scale)),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        else:
+            head_crop_scaled = head_crop
+
+        try:
+            results = self._face_model(head_crop_scaled, verbose=False, conf=0.30)
+            if not results or results[0].boxes is None or len(results[0].boxes) == 0:
+                return None
+
+            boxes = results[0].boxes.xyxy.cpu().numpy()
+            confs = results[0].boxes.conf.cpu().numpy()
+            classes = results[0].boxes.cls.cpu().numpy().astype(int)
+
+            # Class 0 = "face" in the custom model
+            valid_mask = classes == 0
+            if not valid_mask.any():
+                return None
+
+            valid_boxes = boxes[valid_mask]
+            valid_confs = confs[valid_mask]
+            best_idx = int(valid_confs.argmax())
+            best_conf = float(valid_confs[best_idx])
+            fx1, fy1, fx2, fy2 = valid_boxes[best_idx]
+
+            # Map back to original crop coordinates if we scaled
+            if head_crop_scaled is not head_crop:
+                _inv_scale = hcw / head_crop_scaled.shape[1]
+                fx1 *= _inv_scale
+                fy1 *= _inv_scale
+                fx2 *= _inv_scale
+                fy2 *= _inv_scale
+
+            # Expand by 12% for chin/forehead
+            fw, fh = fx2 - fx1, fy2 - fy1
+            _expand = 0.12
+            fx1 = fx1 - fw * _expand
+            fy1 = fy1 - fh * _expand
+            fx2 = fx2 + fw * _expand
+            fy2 = fy2 + fh * _expand * 1.3
+
+            # Map to full-frame coordinates
+            ox, oy = crop_origin
+            abs_x1 = max(0, int(fx1 + ox))
+            abs_y1 = max(0, int(fy1 + oy))
+            abs_x2 = min(frame.shape[1], int(fx2 + ox))
+            abs_y2 = min(frame.shape[0], int(fy2 + oy))
+
+            w = abs_x2 - abs_x1
+            h = abs_y2 - abs_y1
+            if w > 5 and h > 5:
+                return (abs_x1, abs_y1, w, h, best_conf)
+
+        except Exception:
+            pass
+
+        return None
+
     # ─────────────────────────────────────────────────────────────────────────
     # Public API (drop-in compatible with legacy YOLOv8FaceDetector)
     # ─────────────────────────────────────────────────────────────────────────
@@ -128,13 +267,21 @@ class YOLO26FaceDetector:
         """
         Detect faces in frame.
 
+        When the custom YOLO26-face model is available, uses a two-stage
+        pipeline for dramatically better face localisation:
+          1. YOLO26-pose → person bboxes + 17 COCO keypoints
+          2. For each person, crop head region from keypoints
+          3. Run YOLO26-face (custom, class 0 = "face") on the head crop
+        Falls back to keypoint-derived face boxes when the custom model
+        is absent or fails to detect a face in the crop.
+
         Args:
             frame: Input image (BGR format).
 
         Returns:
             List of (x, y, w, h, confidence) tuples, one per detected face.
-            Confidence is the YOLO26 person-detection confidence for that
-            individual (same meaning as the old YOLOv8-face confidence).
+            Confidence is the face-model confidence when the custom model
+            fires, otherwise the YOLO26 person-detection confidence.
         """
         try:
             results = self.model(
@@ -164,7 +311,57 @@ class YOLO26FaceDetector:
             if conf < self.confidence_threshold:
                 continue
 
-            # Derive face bbox from keypoints when available
+            # ── Stage 1 (custom face model): keypoints → head crop → YOLO26-face ──
+            if (
+                self._face_model_is_custom
+                and keypoints_data is not None
+                and i < len(keypoints_data)
+            ):
+                kpts = keypoints_data[i]
+                # Extract head crop from facial keypoints
+                face_pts = []
+                for idx in self._FACE_KPT_INDICES:
+                    kx, ky, kconf = kpts[idx]
+                    if kconf > self._KPT_CONF_THRESHOLD:
+                        face_pts.append((float(kx), float(ky)))
+
+                head_crop = None
+                crop_origin = (0, 0)
+                if len(face_pts) >= 2:
+                    xs = [p[0] for p in face_pts]
+                    ys = [p[1] for p in face_pts]
+                    pad_x = max(30, (max(xs) - min(xs)) * 0.8)
+                    pad_y = max(30, (max(ys) - min(ys)) * 1.0)
+                    hx1 = max(0, int(min(xs) - pad_x))
+                    hy1 = max(0, int(min(ys) - pad_y))
+                    hx2 = min(frame.shape[1], int(max(xs) + pad_x))
+                    hy2 = min(frame.shape[0], int(max(ys) + pad_y * 1.5))
+                    if hx2 > hx1 + 20 and hy2 > hy1 + 20:
+                        head_crop = frame[hy1:hy2, hx1:hx2]
+                        crop_origin = (hx1, hy1)
+
+                # Fallback head crop: top 25% of body bbox
+                if head_crop is None or head_crop.size == 0:
+                    bx1, by1, bx2, by2 = map(int, box)
+                    bw, bh = bx2 - bx1, by2 - by1
+                    head_h = int(bh * 0.25)
+                    hy1 = max(0, by1)
+                    hy2 = min(frame.shape[0], by1 + head_h)
+                    hx1 = max(0, int(bx1 + bw * 0.05))
+                    hx2 = min(frame.shape[1], int(bx1 + bw * 0.95))
+                    if hx2 > hx1 + 10 and hy2 > hy1 + 10:
+                        head_crop = frame[hy1:hy2, hx1:hx2]
+                        crop_origin = (hx1, hy1)
+
+                if head_crop is not None and head_crop.size > 0:
+                    result_face = self._run_face_model_on_head_crop(
+                        frame, head_crop, crop_origin
+                    )
+                    if result_face is not None:
+                        detections.append(result_face)
+                        continue  # Got a precise face — skip keypoint fallback
+
+            # ── Stage 2 (fallback): derive face bbox from keypoints ──
             face_bbox: Optional[Tuple[int, int, int, int]] = None
 
             if keypoints_data is not None and i < len(keypoints_data):

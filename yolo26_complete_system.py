@@ -9,8 +9,8 @@ Three-model architecture (all YOLO26 family):
   ┌─────────────────────────────────────────────────────────────────┐
   │ Model                │ File                  │ Role             │
   ├─────────────────────────────────────────────────────────────────┤
-  │ YOLO26 Detection     │ yolo26n.pt            │ Face detection   │
-  │                      │                       │ (dedicated high- │
+  │ YOLO26 Face (custom) │ yolo26n-face.pt       │ Face detection   │
+  │                      │ (trained on faces)    │ (dedicated high- │
   │                      │                       │  res face crop)  │
   ├─────────────────────────────────────────────────────────────────┤
   │ YOLO26 Segmentation  │ yolo26n-seg.pt        │ Pixel-level body │
@@ -21,13 +21,19 @@ Three-model architecture (all YOLO26 family):
   │ YOLO26 Pose          │ yolo26n-pose.pt       │ Body bbox + 17   │
   │                      │                       │ keypoints for    │
   │                      │                       │ tracking & gait  │
+  ├─────────────────────────────────────────────────────────────────┤
+  │ YOLO26 Body Detect   │ yolo26n.pt            │ Body-level re-ID │
+  │                      │                       │ (general detect) │
   └─────────────────────────────────────────────────────────────────┘
 
-Why three models?
+Why four models?
   - People wearing identical uniforms (e.g. CISF) cannot be distinguished
-    by body/clothing colour alone.  A dedicated face detector runs on a
-    zoomed face crop at entry AND room, giving a reliable biometric signal
-    that is independent of clothing.
+    by body/clothing colour alone.  A CUSTOM-TRAINED face detector
+    (yolo26n-face.pt) runs on a zoomed face crop at entry AND room,
+    giving a reliable biometric signal that is independent of clothing.
+    Unlike the generic COCO model (yolo26n.pt), this model is trained
+    specifically on face data and outputs class 0 = "face".
+  - The generic yolo26n.pt is used for body-level re-ID (OSNet).
   - Segmentation masks isolate the exact pixels of a garment, removing
     background bleed that corrupts histogram-based colour matching.
   - Pose keypoints feed ByteTrack for stable multi-person track IDs and
@@ -144,8 +150,9 @@ class YOLO26CompleteSystem:
                            Primary person detector — body bounding boxes,
                            17-point COCO keypoints, drives ByteTrack.
 
-    self.face_detector     YOLO26(yolo26n.pt)  [detection variant]
-                           Dedicated face detector.  Runs on a zoomed
+    self.face_detector     YOLO26(yolo26n-face.pt)  [custom-trained face model]
+                           Dedicated face detector trained on face data.
+                           Outputs class 0 = "face".  Runs on a zoomed
                            head-region crop extracted from the pose
                            keypoints, giving sub-pixel-accurate face boxes
                            that InsightFace then embeds.  Used at entry,
@@ -188,7 +195,7 @@ class YOLO26CompleteSystem:
             "✅ YOLO26-pose  (yolo26n-pose.pt) — body bbox + 17 keypoints + ByteTrack"
         )
         print(
-            "✅ YOLO26-det   (yolo26n.pt)      — dedicated face detection on head crops"
+            "✅ YOLO26-face  (yolo26n-face.pt)  — custom-trained face detection on head crops"
         )
         print(
             "✅ YOLO26-seg   (yolo26n-seg.pt)  — pixel masks → precise clothing colour"
@@ -237,27 +244,64 @@ class YOLO26CompleteSystem:
             else "cpu"
         )
 
-        # ── Model 2: YOLO26-detect — dedicated face detector ─────────────────
-        # Uses the plain detection variant (yolo26n.pt) which is trained on
-        # COCO person class.  We run it on tight head-region crops so it can
-        # pick out faces that are too small for the full-frame pose model to
-        # localise precisely.  InsightFace then embeds those crops.
+        # ── Model 2: YOLO26-face — CUSTOM-TRAINED dedicated face detector ────
+        # Uses your custom-trained model (yolo26n-face.pt) which was trained
+        # specifically on face data.  Class 0 = "face".  This replaces the
+        # generic COCO yolo26n.pt that could only detect "person" class and
+        # was a major source of false positives (it couldn't reliably find
+        # faces in head crops because it wasn't trained for that task).
+        #
+        # Fallback chain:
+        #   1. yolo26n-face.pt (custom trained — preferred)
+        #   2. custom_models/yolo26_face_results/weights/best.pt (source weights)
+        #   3. yolo26n.pt (generic COCO — worst for face detection)
         self.face_detect_model = None
         if _YOLO26_AVAILABLE:
-            _face_det_path = "yolo26n.pt"
-            try:
+            _face_model_candidates = [
+                "yolo26n-face.pt",
+                os.path.join(
+                    "custom_models", "yolo26_face_results", "weights", "best.pt"
+                ),
+                "yolo26n.pt",  # last resort fallback
+            ]
+            _face_det_path = None
+            for _candidate in _face_model_candidates:
+                if os.path.exists(_candidate):
+                    _face_det_path = _candidate
+                    break
+
+            if _face_det_path is not None:
+                try:
+                    _is_custom = "face" in _face_det_path.lower()
+                    _label = (
+                        "custom-trained face"
+                        if _is_custom
+                        else "generic COCO (fallback)"
+                    )
+                    print(
+                        f"🔧 Loading YOLO26-face model ({_label}): {_face_det_path}..."
+                    )
+                    self.face_detect_model = _YOLO26(_face_det_path)
+                    self.face_detect_model.to(_dev)
+                    # Store whether this is the custom face model so
+                    # _detect_face_on_head_crop knows what class to look for
+                    self._face_model_is_custom = _is_custom
+                    print(
+                        f"✅ YOLO26-face model loaded on {_dev} [{'CUSTOM' if _is_custom else 'GENERIC'}]"
+                    )
+                except Exception as _e:
+                    print(f"⚠️  YOLO26-face model unavailable: {_e}")
+                    print("   Face localisation will fall back to pose-keypoint crops.")
+                    self.face_detect_model = None
+                    self._face_model_is_custom = False
+            else:
                 print(
-                    f"🔧 Loading YOLO26-detect model for face detection ({_face_det_path})..."
+                    "⚠️  No face detection model found — face localisation will use keypoint crops only"
                 )
-                self.face_detect_model = _YOLO26(_face_det_path)
-                self.face_detect_model.to(_dev)
-                print(f"✅ YOLO26-detect face model loaded on {_dev}")
-            except Exception as _e:
-                print(f"⚠️  YOLO26-detect face model unavailable: {_e}")
-                print("   Face localisation will fall back to pose-keypoint crops.")
-                self.face_detect_model = None
+                self._face_model_is_custom = False
         else:
-            print("⚠️  ultralytics unavailable — YOLO26-detect face model skipped")
+            print("⚠️  ultralytics unavailable — YOLO26-face model skipped")
+            self._face_model_is_custom = False
         print()
 
         # ── Model 3: YOLO26-seg — instance segmentation for clothing masks ───
@@ -444,20 +488,25 @@ class YOLO26CompleteSystem:
         self.last_entry_person_bbox = None  # Track last registered person's bbox
         self.entry_area_threshold = 0.2  # 20% overlap = same person (more lenient)
 
-        # Feature weights for matching (REBALANCED to prevent false positives)
-        # OSNet is most discriminative, appearance features are weak across people
-        self.osnet_weight = 0.70  # INCREASED - most important for person identity
-        self.hair_weight = 0.05  # DECREASED - too similar across people
-        self.skin_weight = 0.05  # DECREASED - too similar across people
-        self.clothing_weight = 0.20
+        # Feature weights for matching (REBALANCED for custom face model)
+        # With yolo26n-face.pt custom model, face detections are much more
+        # reliable than before.  Face signal is now the primary discriminator.
+        # OSNet provides strong secondary confirmation.
+        self.osnet_weight = 0.65  # Strong secondary signal
+        self.hair_weight = 0.05  # Weak — too similar across uniformed people
+        self.skin_weight = 0.05  # Weak — too similar across people
+        self.clothing_weight = 0.25  # Moderate — helps when face unavailable
 
         # Hard OSNet minimum threshold - reject if OSNet alone is too low
         # This prevents matches based purely on appearance when body features don't match
-        self.min_osnet_threshold = 0.50  # OSNet must be at least 0.50 for any match
+        self.min_osnet_threshold = 0.45  # OSNet must be at least 0.45 for any match
 
-        # Face recognition weights (Phase 5)
-        self.face_weight = 0.60  # Face is most discriminative when available
-        self.face_threshold = 0.45  # InsightFace threshold (0.4-0.5 typical)
+        # Face recognition weights (Phase 5 — boosted for custom face model)
+        # The custom yolo26n-face.pt produces dramatically better face crops
+        # than the old generic COCO model, so face matching is now more
+        # trustworthy and should carry more weight.
+        self.face_weight = 0.70  # INCREASED — custom face model is highly reliable
+        self.face_threshold = 0.40  # Slightly lower — custom model gives cleaner crops
         self.use_face_at_entry = True  # Always try to capture face at entry
         self.use_face_at_exit = True  # Face-first matching at exit
 
@@ -502,9 +551,12 @@ class YOLO26CompleteSystem:
         )
         print(f"  Models loaded:")
         print(f"    Pose:  yolo26n-pose.pt  ({'✅' if self.detector else '❌'})")
-        print(
-            f"    Det:   yolo26n.pt        ({'✅' if self.face_detect_model else '⚠️  fallback'})"
+        _face_status = (
+            "✅ CUSTOM"
+            if (self.face_detect_model and self._face_model_is_custom)
+            else ("⚠️  generic" if self.face_detect_model else "❌ none")
         )
+        print(f"    Face:  yolo26n-face.pt   ({_face_status})")
         print(
             f"    Seg:   yolo26n-seg.pt    ({'✅' if self.seg_model else '⚠️  fallback'})"
         )
@@ -657,9 +709,14 @@ class YOLO26CompleteSystem:
         self, frame: np.ndarray, detection: dict
     ) -> np.ndarray | None:
         """
-        Run YOLO26-detect on a tight head-region crop derived from pose
-        keypoints (or top-20% of body bbox as fallback) to get a high-quality
-        face bounding box, then pass that crop to InsightFace for embedding.
+        Run YOLO26-face (custom-trained) on a tight head-region crop derived
+        from pose keypoints (or top-25% of body bbox as fallback) to get a
+        high-quality face bounding box, then pass that crop to InsightFace
+        for embedding.
+
+        The custom face model outputs class 0 = "face", so we filter for
+        that class specifically.  If the generic COCO model is used as
+        fallback, we accept class 0 = "person" instead.
 
         Returns the face image crop (BGR) or None if no face found.
         """
@@ -673,6 +730,7 @@ class YOLO26CompleteSystem:
         # ── Derive head-region crop ───────────────────────────────────────────
         # Primary: use nose + eye + ear keypoints for a tight head bbox
         head_crop = None
+        _head_origin = (0, 0)  # track origin for debug
 
         if keypoints is not None:
             face_kpt_indices = [0, 1, 2, 3, 4]  # nose, l_eye, r_eye, l_ear, r_ear
@@ -685,56 +743,125 @@ class YOLO26CompleteSystem:
             if len(face_pts) >= 2:
                 xs = [p[0] for p in face_pts]
                 ys = [p[1] for p in face_pts]
-                pad_x = max(20, (max(xs) - min(xs)) * 0.6)
-                pad_y = max(20, (max(ys) - min(ys)) * 0.8)
+                # Generous padding to give the face model enough context
+                pad_x = max(30, (max(xs) - min(xs)) * 0.8)
+                pad_y = max(30, (max(ys) - min(ys)) * 1.0)
                 hx1 = max(0, int(min(xs) - pad_x))
                 hy1 = max(0, int(min(ys) - pad_y))
                 hx2 = min(frame.shape[1], int(max(xs) + pad_x))
                 hy2 = min(frame.shape[0], int(max(ys) + pad_y * 1.5))
-                if hx2 > hx1 and hy2 > hy1:
+                if hx2 > hx1 + 20 and hy2 > hy1 + 20:
                     head_crop = frame[hy1:hy2, hx1:hx2]
+                    _head_origin = (hx1, hy1)
 
-        # Fallback: top 22% of person bbox
+        # Fallback: top 25% of person bbox (slightly larger than before)
         if head_crop is None or head_crop.size == 0:
-            head_h = int(bh * 0.22)
+            head_h = int(bh * 0.25)
             hy1 = max(0, by)
             hy2 = min(frame.shape[0], by + head_h)
-            hx1 = max(0, int(bx + bw * 0.1))
-            hx2 = min(frame.shape[1], int(bx + bw * 0.9))
-            if hx2 > hx1 and hy2 > hy1:
+            hx1 = max(0, int(bx + bw * 0.05))
+            hx2 = min(frame.shape[1], int(bx + bw * 0.95))
+            if hx2 > hx1 + 10 and hy2 > hy1 + 10:
                 head_crop = frame[hy1:hy2, hx1:hx2]
+                _head_origin = (hx1, hy1)
 
         if head_crop is None or head_crop.size == 0:
             return None
 
-        # ── YOLO26-detect on head crop (if model available) ───────────────────
+        # ── Upscale small head crops for better face detection ────────────────
+        # The custom face model was trained at 640px; tiny crops lose detail.
+        _min_dim = 80
+        hch, hcw = head_crop.shape[:2]
+        if hch < _min_dim or hcw < _min_dim:
+            _scale = max(_min_dim / hch, _min_dim / hcw)
+            _new_w = int(hcw * _scale)
+            _new_h = int(hch * _scale)
+            head_crop_scaled = cv2.resize(
+                head_crop, (_new_w, _new_h), interpolation=cv2.INTER_LINEAR
+            )
+        else:
+            head_crop_scaled = head_crop
+
+        # ── YOLO26-face on head crop (custom or generic) ─────────────────────
         face_crop = None
+        _face_det_conf = 0.0
+
         if self.face_detect_model is not None:
             try:
-                results = self.face_detect_model(head_crop, verbose=False, conf=0.35)
+                # Use lower confidence for custom face model (it's trained for this)
+                # and higher for generic COCO model (more noise)
+                _conf_thresh = 0.30 if self._face_model_is_custom else 0.45
+                results = self.face_detect_model(
+                    head_crop_scaled, verbose=False, conf=_conf_thresh
+                )
                 if (
                     results
                     and results[0].boxes is not None
                     and len(results[0].boxes) > 0
                 ):
-                    # Pick the highest-confidence box
                     boxes = results[0].boxes.xyxy.cpu().numpy()
                     confs = results[0].boxes.conf.cpu().numpy()
-                    best_idx = int(confs.argmax())
-                    fx1, fy1, fx2, fy2 = map(int, boxes[best_idx])
-                    # Expand by 15% for chin + forehead
-                    fw, fh = fx2 - fx1, fy2 - fy1
-                    fx1 = max(0, fx1 - int(fw * 0.15))
-                    fy1 = max(0, fy1 - int(fh * 0.15))
-                    fx2 = min(head_crop.shape[1], fx2 + int(fw * 0.15))
-                    fy2 = min(head_crop.shape[0], fy2 + int(fh * 0.20))
-                    face_crop = head_crop[fy1:fy2, fx1:fx2]
+                    classes = results[0].boxes.cls.cpu().numpy().astype(int)
+
+                    # Custom model: class 0 = "face"
+                    # Generic COCO: class 0 = "person"
+                    # In both cases we want class 0, but for the custom model
+                    # we can be confident it really is a face detection.
+                    _target_cls = 0
+                    valid_mask = classes == _target_cls
+                    if valid_mask.any():
+                        valid_boxes = boxes[valid_mask]
+                        valid_confs = confs[valid_mask]
+                        best_idx = int(valid_confs.argmax())
+                        _face_det_conf = float(valid_confs[best_idx])
+                        fx1, fy1, fx2, fy2 = map(int, valid_boxes[best_idx])
+
+                        # If we scaled the crop, map coordinates back
+                        if head_crop_scaled is not head_crop:
+                            _inv_scale = hcw / head_crop_scaled.shape[1]
+                            fx1 = int(fx1 * _inv_scale)
+                            fy1 = int(fy1 * _inv_scale)
+                            fx2 = int(fx2 * _inv_scale)
+                            fy2 = int(fy2 * _inv_scale)
+
+                        # Expand by 12% for chin + forehead (less aggressive
+                        # than before — the custom model gives tighter boxes)
+                        fw, fh = fx2 - fx1, fy2 - fy1
+                        _expand = 0.12 if self._face_model_is_custom else 0.15
+                        fx1 = max(0, fx1 - int(fw * _expand))
+                        fy1 = max(0, fy1 - int(fh * _expand))
+                        fx2 = min(head_crop.shape[1], fx2 + int(fw * _expand))
+                        fy2 = min(head_crop.shape[0], fy2 + int(fh * _expand * 1.3))
+                        if fx2 > fx1 + 5 and fy2 > fy1 + 5:
+                            face_crop = head_crop[fy1:fy2, fx1:fx2]
+
+                if self.debug_mode:
+                    _n_det = (
+                        len(results[0].boxes)
+                        if results and results[0].boxes is not None
+                        else 0
+                    )
+                    _model_tag = (
+                        "CUSTOM-FACE" if self._face_model_is_custom else "GENERIC"
+                    )
+                    if face_crop is not None:
+                        print(
+                            f"   🎯 [{_model_tag}] Face detected: conf={_face_det_conf:.2f}, "
+                            f"crop={face_crop.shape[1]}x{face_crop.shape[0]} "
+                            f"(from {_n_det} detection(s) in head crop)"
+                        )
+                    else:
+                        print(
+                            f"   ⚠️  [{_model_tag}] No face in head crop "
+                            f"({_n_det} raw detections, conf_thresh={_conf_thresh})"
+                        )
+
             except Exception as _e:
                 if self.debug_mode:
-                    print(f"   ⚠️  YOLO26-detect face inference failed: {_e}")
+                    print(f"   ⚠️  YOLO26-face inference failed: {_e}")
                 face_crop = None
 
-        # Fallback: use the whole head crop if YOLO26-detect didn't fire
+        # Fallback: use the whole head crop if YOLO26-face didn't fire
         if face_crop is None or face_crop.size == 0:
             face_crop = head_crop
 
@@ -751,7 +878,7 @@ class YOLO26CompleteSystem:
         Extraction pipeline:
           1. OSNet embedding from body bbox crop
           2. Body analyser (hair / skin / clothing) using YOLO26-seg masked crop
-          3. Face embedding via YOLO26-detect head crop → InsightFace ArcFace
+          3. Face embedding via YOLO26-face (custom) head crop → InsightFace ArcFace
         """
         try:
             body_bbox = detection["body_bbox"]
@@ -783,7 +910,12 @@ class YOLO26CompleteSystem:
             face_embedding = None
             if self.use_face_recognition and self.use_face_at_entry:
                 if self.debug_mode:
-                    print(f"   Detecting face with YOLO26-detect on head crop...")
+                    _ftag = (
+                        "YOLO26-face (custom)"
+                        if self._face_model_is_custom
+                        else "YOLO26-detect (generic)"
+                    )
+                    print(f"   Detecting face with {_ftag} on head crop...")
 
                 face_crop = self._detect_face_on_head_crop(frame, detection)
                 if face_crop is not None:
@@ -795,7 +927,10 @@ class YOLO26CompleteSystem:
                     )
 
                 if face_embedding is not None:
-                    print(f"   ✅ Face detected and embedded via YOLO26-detect (512D)")
+                    _ftag = "custom" if self._face_model_is_custom else "generic"
+                    print(
+                        f"   ✅ Face detected and embedded via YOLO26-face [{_ftag}] (512D)"
+                    )
                 else:
                     print(f"   ⚠️  No face detected (will use body-only matching)")
 
@@ -971,15 +1106,50 @@ class YOLO26CompleteSystem:
             # ── Weighted combination with face (ALL cameras) ─────────────
             if has_face_match and face_sim >= self.face_threshold:
                 # Face match confirmed — face-dominant scoring.
-                # face_weight=0.60, remaining 0.40 goes to OSNet.
-                # This path is now reachable from room AND exit, not exit-only.
+                # face_weight=0.70, remaining 0.30 goes to OSNet.
+                # The custom yolo26n-face.pt model gives much cleaner face
+                # crops, so face similarity is now highly trustworthy.
                 total_score = face_sim * self.face_weight + osnet_sim * (
                     1.0 - self.face_weight
                 )
 
                 if self.debug_mode:
                     print(
-                        f"   Using FACE-DOMINANT scoring [{target_camera}]: {total_score:.3f}"
+                        f"   Using FACE-DOMINANT scoring [{target_camera}]: "
+                        f"{total_score:.3f} (face={face_sim:.3f}×{self.face_weight:.2f} "
+                        f"+ osnet={osnet_sim:.3f}×{1.0 - self.face_weight:.2f})"
+                    )
+            elif has_face_match and face_sim < self.face_threshold and face_sim > 0.15:
+                # Face was detected but did NOT match — this is a strong
+                # NEGATIVE signal.  If we can see a face and it doesn't match,
+                # the person is likely different.  Penalise the body-only
+                # score to prevent false positives from clothing similarity.
+                if osnet_sim < self.min_osnet_threshold:
+                    debug_info["all_scores"][person_id] = {
+                        "osnet": osnet_sim,
+                        "hair": hair_sim,
+                        "skin": skin_sim,
+                        "clothing": clothing_sim,
+                        "face": face_sim,
+                        "total": 0.0,
+                        "rejected": f"Face mismatch ({face_sim:.3f}) + low OSNet ({osnet_sim:.3f})",
+                    }
+                    continue  # Skip this person entirely
+
+                # Apply penalty: reduce body score when face says "not the same person"
+                _face_penalty = 0.85  # 15% penalty
+                total_score = (
+                    osnet_sim * self.osnet_weight
+                    + hair_sim * self.hair_weight
+                    + skin_sim * self.skin_weight
+                    + clothing_sim * self.clothing_weight
+                ) * _face_penalty
+
+                if self.debug_mode:
+                    print(
+                        f"   ⚠️  Face MISMATCH penalty [{target_camera}]: "
+                        f"face={face_sim:.3f} < {self.face_threshold:.2f} → "
+                        f"body score penalised to {total_score:.3f}"
                     )
             else:
                 # No face or face didn't match - use body-only scoring

@@ -8,11 +8,34 @@ Modify these values to tune performance and behavior without changing the main c
 """
 
 # ============================================================================
+# MODEL CONFIGURATION — YOLO26 Multi-Model Architecture
+# ============================================================================
+
+# YOLO26 Pose Model — body detection + 17 COCO keypoints + ByteTrack
+YOLO_MODEL_PATH = "yolo26n-pose.pt"  # Primary person detector (pose variant)
+
+# YOLO26 Face Model — CUSTOM-TRAINED dedicated face detector
+# Trained on face data; outputs class 0 = "face".
+# Dramatically reduces false positives vs the generic COCO model (yolo26n.pt)
+# which could only detect "person" class and wasn't designed for face localisation.
+# Fallback chain: yolo26n-face.pt → custom_models/.../best.pt → yolo26n.pt
+YOLO_FACE_MODEL_PATH = "yolo26n-face.pt"
+YOLO_FACE_MODEL_FALLBACK = "custom_models/yolo26_face_results/weights/best.pt"
+
+# YOLO26 Segmentation Model — pixel-level instance masks for clothing colour
+YOLO_SEG_MODEL_PATH = "yolo26n-seg.pt"
+
+# YOLO26 Body Detection Model — generic COCO detector for body-level re-ID
+YOLO_BODY_MODEL_PATH = "yolo26n.pt"
+
+# YOLO26 Threat Detection Model — CUSTOM-TRAINED for guns/knives (room camera)
+# Not yet integrated into main pipeline; available for future use.
+YOLO_THREAT_MODEL_PATH = "custom_models/yolov26n-threat_detection/weights/best.pt"
+
+# ============================================================================
 # DETECTION CONFIGURATION
 # ============================================================================
 
-# YOLO Model Configuration
-YOLO_MODEL_PATH = "yolo26n-pose.pt"  # YOLO26 unified detection model (pose + body + face via keypoints)
 DETECTION_CONFIDENCE_THRESHOLD = 0.8  # Minimum confidence score (0.0 to 1.0)
 # Lower = more detections, Higher = fewer false positives
 # Recommended: 0.6 (lenient) to 0.9 (strict)
@@ -26,6 +49,18 @@ DETECT_EVERY_N_FRAMES = (
 
 MAX_FACES_PER_FRAME = 10  # Maximum number of faces to process per frame
 # Reduces computation when multiple people are in frame
+
+
+# Face Detection Confidence (for custom YOLO26-face model)
+FACE_DETECTION_CONFIDENCE = (
+    0.30  # Custom face model — lower is fine (trained for faces)
+)
+FACE_DETECTION_CONFIDENCE_GENERIC = (
+    0.45  # Generic COCO fallback — higher to reduce noise
+)
+
+# Minimum head crop size before upscaling (pixels)
+MIN_HEAD_CROP_SIZE = 80  # Crops smaller than this are upscaled for the face model
 
 
 # ============================================================================
@@ -89,6 +124,29 @@ FAISS_INDEX_TYPE = "FlatL2"  # FAISS index type
 MATCH_CONFIDENCE_HIGH = 0.4  # Distance < 0.4 = High confidence match
 MATCH_CONFIDENCE_MEDIUM = 0.6  # Distance 0.4-0.6 = Medium confidence match
 MATCH_CONFIDENCE_LOW = 0.8  # Distance 0.6-0.8 = Low confidence match (reject)
+
+# ============================================================================
+# RE-IDENTIFICATION WEIGHTS (used by yolo26_complete_system.py)
+# ============================================================================
+# These control how much each signal contributes to the final match score.
+# With the custom yolo26n-face.pt model, face is the primary discriminator.
+
+# Face recognition (InsightFace ArcFace via YOLO26-face crop)
+FACE_WEIGHT = 0.70  # Face is most discriminative when available (custom model)
+FACE_THRESHOLD = 0.40  # InsightFace cosine threshold (lower OK with custom model)
+FACE_MISMATCH_PENALTY = 0.85  # Penalty factor when face is visible but doesn't match
+
+# OSNet body embedding (secondary signal)
+OSNET_WEIGHT = 0.65  # Strong body-level signal
+MIN_OSNET_THRESHOLD = 0.45  # Hard floor — reject if OSNet alone is below this
+
+# Appearance features (weak signals — especially for uniformed scenarios)
+HAIR_WEIGHT = 0.05  # Too similar across uniformed people
+SKIN_WEIGHT = 0.05  # Too similar across people
+CLOTHING_WEIGHT = 0.25  # Moderate — helps when face is unavailable
+
+# Track cache settings (ByteTrack room camera)
+TRACK_CACHE_TTL = 30.0  # Seconds before a cached track→person match expires
 
 
 # ============================================================================
@@ -201,6 +259,10 @@ PRINT_TIMING = False  # Print timing for each pipeline step
 YOLO_IOU_THRESHOLD = 0.45  # IoU threshold (legacy; YOLO26 does not use NMS)
 YOLO_MAX_DETECTIONS = 300  # Maximum detections per frame
 
+# Custom Model Paths (absolute fallbacks)
+CUSTOM_FACE_MODEL_DIR = "custom_models/yolo26_face_results"
+CUSTOM_THREAT_MODEL_DIR = "custom_models/yolov26n-threat_detection"
+
 # Face Encoding Advanced
 NORMALIZE_EMBEDDINGS = True  # Normalize embeddings to unit length
 # Required for cosine similarity
@@ -288,6 +350,8 @@ def validate_config():
     Validate configuration parameters.
     Raises ValueError if configuration is invalid.
     """
+    import os
+
     if not 0.0 <= DETECTION_CONFIDENCE_THRESHOLD <= 1.0:
         raise ValueError("DETECTION_CONFIDENCE_THRESHOLD must be between 0.0 and 1.0")
 
@@ -310,6 +374,28 @@ def validate_config():
     ]:
         print(f"WARNING: Unknown FACE_ENCODER_MODEL: {FACE_ENCODER_MODEL}")
 
+    # Validate model files
+    _models = {
+        "Pose model": YOLO_MODEL_PATH,
+        "Face model (primary)": YOLO_FACE_MODEL_PATH,
+        "Face model (fallback)": YOLO_FACE_MODEL_FALLBACK,
+        "Seg model": YOLO_SEG_MODEL_PATH,
+        "Body model": YOLO_BODY_MODEL_PATH,
+    }
+    for label, path in _models.items():
+        if os.path.exists(path):
+            print(f"  ✓ {label}: {path}")
+        else:
+            print(f"  ⚠ {label}: {path} (NOT FOUND)")
+
+    # Validate re-ID weights sum reasonably
+    _body_only_sum = OSNET_WEIGHT + HAIR_WEIGHT + SKIN_WEIGHT + CLOTHING_WEIGHT
+    if abs(_body_only_sum - 1.0) > 0.05:
+        print(
+            f"  ⚠ Body-only weights sum to {_body_only_sum:.2f} (expected ~1.0): "
+            f"osnet={OSNET_WEIGHT} + hair={HAIR_WEIGHT} + skin={SKIN_WEIGHT} + clothing={CLOTHING_WEIGHT}"
+        )
+
     print("✓ Configuration validated successfully")
 
 
@@ -325,3 +411,15 @@ if __name__ == "__main__":
     print(f"  Camera Index: {CAMERA_INDEX}")
     print(f"  Camera Resolution: {CAMERA_WIDTH}x{CAMERA_HEIGHT}")
     print(f"  Process Every N Frames: {DETECT_EVERY_N_FRAMES}")
+    print("\nYOLO26 Model Suite:")
+    print(f"  Pose:   {YOLO_MODEL_PATH}")
+    print(f"  Face:   {YOLO_FACE_MODEL_PATH} (custom-trained)")
+    print(f"  Seg:    {YOLO_SEG_MODEL_PATH}")
+    print(f"  Body:   {YOLO_BODY_MODEL_PATH}")
+    print(f"  Threat: {YOLO_THREAT_MODEL_PATH} (room camera, future)")
+    print("\nRe-ID Weights:")
+    print(f"  Face weight:     {FACE_WEIGHT} (threshold: {FACE_THRESHOLD})")
+    print(f"  OSNet weight:    {OSNET_WEIGHT} (min threshold: {MIN_OSNET_THRESHOLD})")
+    print(f"  Hair weight:     {HAIR_WEIGHT}")
+    print(f"  Skin weight:     {SKIN_WEIGHT}")
+    print(f"  Clothing weight: {CLOTHING_WEIGHT}")

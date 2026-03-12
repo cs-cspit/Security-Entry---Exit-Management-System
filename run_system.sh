@@ -95,25 +95,65 @@ echo ""
 # ── Ensure data/ directory exists ─────────────────────────────────────────────
 mkdir -p data
 
-# ── YOLO model check ──────────────────────────────────────────────────────────
-if [ ! -f "yolo26n-pose.pt" ]; then
-    echo -e "${YELLOW}⚠️   yolo26n-pose.pt not found in project root.${NC}"
-    echo    "    The system will attempt to download it on first run."
-    echo ""
+# ── YOLO model check ──────────────────────────────────────────────────────
+echo "🔍  Checking YOLO26 model suite…"
+
+if [ -f "yolo26n-pose.pt" ]; then
+    echo -e "${GREEN}   ✅  yolo26n-pose.pt (body detection + keypoints)${NC}"
+else
+    echo -e "${YELLOW}   ⚠️   yolo26n-pose.pt not found — will download on first run.${NC}"
 fi
 
-# ── Controls reminder ────────────────────────────────────────────────────────
+if [ -f "yolo26n-face.pt" ]; then
+    echo -e "${GREEN}   ✅  yolo26n-face.pt (custom-trained face detector)${NC}"
+elif [ -f "custom_models/yolo26_face_results/weights/best.pt" ]; then
+    echo -e "${YELLOW}   ⚠️   yolo26n-face.pt not in root — copying from custom_models…${NC}"
+    cp "custom_models/yolo26_face_results/weights/best.pt" "yolo26n-face.pt"
+    echo -e "${GREEN}   ✅  yolo26n-face.pt copied successfully${NC}"
+else
+    echo -e "${RED}   ❌  No custom face model found — face detection will use generic COCO fallback.${NC}"
+    echo    "       Place your trained model at yolo26n-face.pt or custom_models/yolo26_face_results/weights/best.pt"
+fi
+
+if [ -f "yolo26n-seg.pt" ]; then
+    echo -e "${GREEN}   ✅  yolo26n-seg.pt (instance segmentation masks)${NC}"
+else
+    echo -e "${YELLOW}   ⚠️   yolo26n-seg.pt not found — clothing colour will use raw bbox crops.${NC}"
+fi
+
+if [ -f "yolo26n.pt" ]; then
+    echo -e "${GREEN}   ✅  yolo26n.pt (body-level detection / OSNet)${NC}"
+else
+    echo -e "${YELLOW}   ⚠️   yolo26n.pt not found — will download on first run.${NC}"
+fi
+
+if [ -f "custom_models/yolov26n-threat_detection/weights/best.pt" ]; then
+    echo -e "${GREEN}   ✅  yolov26n-threat_detection (room camera — guns/knives)${NC}"
+else
+    echo -e "${YELLOW}   ℹ️   Threat detection model not found (optional, for future use).${NC}"
+fi
+
+echo ""
+
+# ── Controls reminder ────────────────────────────────────────────────────
 echo "🎮  Keyboard Controls:"
 echo "      D  — Toggle debug output"
 echo "      F  — Toggle face recognition (Phase 5)"
 echo "      C  — Clear all registrations"
 echo "      S  — Show statistics"
 echo "      I  — Cross-camera adapter diagnostics"
+echo "      T  — Tracker diagnostics (ByteTrack)"
 echo "      +  — Increase room matching threshold"
 echo "      -  — Decrease room matching threshold"
 echo "      ]  — Increase exit matching threshold"
 echo "      [  — Decrease exit matching threshold"
 echo "      Q  — Quit and export session data"
+echo ""
+echo "📊  Model Architecture (4-model YOLO26 suite):"
+echo "      Pose:   yolo26n-pose.pt       → body bbox + 17 keypoints + ByteTrack"
+echo "      Face:   yolo26n-face.pt       → custom-trained face detection (class 0 = face)"
+echo "      Seg:    yolo26n-seg.pt        → pixel masks for clothing colour"
+echo "      Body:   yolo26n.pt            → body-level detection / OSNet features"
 echo ""
 echo -e "${CYAN}=====================================================================${NC}"
 echo ""
