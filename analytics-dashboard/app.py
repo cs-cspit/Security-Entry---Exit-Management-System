@@ -14,6 +14,8 @@ Key principles:
 """
 
 import atexit
+import csv
+import io
 import os
 import signal as _signal
 import sqlite3
@@ -357,6 +359,47 @@ def stop_bridge():
     pass
 
 
+def fetch_bridge_json(path: str, params=None, timeout: float = 1.8):
+    """Fetch JSON from the live FastAPI bridge safely."""
+    try:
+        r = requests.get(f"{FASTAPI_URL}{path}", params=params or {}, timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
+def _bridge_alert_id(alert: dict, idx: int = 0) -> int:
+    """Create a deterministic numeric ID for bridge alerts."""
+    ts = str(alert.get("timestamp") or "")
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000) + idx
+    except Exception:
+        return int(time.time() * 1000) + idx
+
+
+def normalize_bridge_alerts(raw_alerts: list[dict]) -> list[dict]:
+    """Map FastAPI bridge alerts to dashboard alert schema."""
+    out = []
+    for idx, a in enumerate(raw_alerts):
+        out.append(
+            {
+                "id": _bridge_alert_id(a, idx),
+                "alert_type": a.get("alert_type", "system_event"),
+                "alert_level": a.get("alert_level", "info"),
+                "person_id": a.get("person_id"),
+                "camera_source": a.get("camera_source"),
+                "message": a.get("message", ""),
+                "timestamp": a.get("timestamp"),
+                "acknowledged": 0,
+                "metadata": a.get("metadata") or {},
+            }
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Helper: safe table count (returns 0 if table is empty or doesn't exist)
 # ---------------------------------------------------------------------------
@@ -454,6 +497,30 @@ def api_overview():
     bridge = get_bridge()
     bridge_running = bridge is not None and bridge.is_running()
 
+    # Bridge stats are live in-memory values and can be newer than SQLite.
+    if bridge_running and bridge:
+        bstats = bridge.get_stats()
+        total_entries = max(total_entries, int(bstats.get("total_detections", 0) or 0))
+        total_exits = max(total_exits, int(bstats.get("exited", 0) or 0))
+        currently_inside = max(currently_inside, int(bstats.get("inside", 0) or 0))
+        total_unauthorized = max(
+            total_unauthorized, int(bstats.get("unauthorized", 0) or 0)
+        )
+        total_people = max(
+            total_people,
+            int(bstats.get("registered", 0) or 0)
+            + int(bstats.get("unauthorized", 0) or 0),
+        )
+
+        bridge_alerts_raw = fetch_bridge_json("/api/alerts", params={"limit": 500})
+        if isinstance(bridge_alerts_raw, list) and bridge_alerts_raw:
+            bridge_alerts = normalize_bridge_alerts(bridge_alerts_raw)
+            total_alerts = max(total_alerts, len(bridge_alerts))
+            bridge_critical = sum(
+                1 for a in bridge_alerts if a.get("alert_level") == "critical"
+            )
+            critical_alerts = max(critical_alerts, bridge_critical)
+
     return jsonify(
         {
             "total_people": total_people,
@@ -470,7 +537,7 @@ def api_overview():
             "avg_velocity": round(avg_velocity, 2),
             "bridge_running": bridge_running,
             "bridge_mode": bridge.mode if bridge_running else "OFF",
-            "has_data": total_people > 0,
+            "has_data": (total_people > 0) or (total_alerts > 0),
         }
     )
 
@@ -523,9 +590,43 @@ def api_people():
     )
 
     conn.close()
+    db_people = [dict(r) for r in rows]
+
+    # Fallback to bridge memory state when SQLite has not been updated yet.
+    if total == 0 and is_bridge_running():
+        bridge_people = fetch_bridge_json("/api/people")
+        if isinstance(bridge_people, list) and bridge_people:
+            mapped = []
+            for p in bridge_people:
+                state_val = "inside_now" if p.get("has_session") else "exited"
+                mapped.append(
+                    {
+                        "person_id": p.get("person_id"),
+                        "temp_uuid": p.get("person_id"),
+                        "permanent_uuid": None,
+                        "state": state_val,
+                        "entry_time": p.get("entry_time"),
+                        "exit_time": None,
+                        "duration_seconds": p.get("duration_seconds") or 0,
+                        "avg_velocity": p.get("avg_velocity") or 0,
+                        "max_velocity": p.get("max_velocity") or 0,
+                        "threat_score": 0,
+                        "alert_count": 0,
+                        "created_at": p.get("entry_time") or datetime.now().isoformat(),
+                    }
+                )
+
+            if state:
+                mapped = [p for p in mapped if p.get("state") == state]
+
+            reverse = order_sql == "DESC"
+            mapped.sort(key=lambda x: x.get(sort_by) or 0, reverse=reverse)
+            total = len(mapped)
+            db_people = mapped[offset : offset + limit]
+
     return jsonify(
         {
-            "people": [dict(r) for r in rows],
+            "people": db_people,
             "total": total,
             "limit": limit,
             "offset": offset,
@@ -581,7 +682,20 @@ def api_people_states():
         "SELECT state, COUNT(*) as count FROM people GROUP BY state"
     ).fetchall()
     conn.close()
-    return jsonify({r["state"]: r["count"] for r in rows})
+    states = {r["state"]: r["count"] for r in rows}
+
+    if not states and is_bridge_running():
+        bridge_people = fetch_bridge_json("/api/people")
+        if isinstance(bridge_people, list) and bridge_people:
+            mapped = {"inside_now": 0, "exited": 0}
+            for p in bridge_people:
+                if p.get("has_session"):
+                    mapped["inside_now"] += 1
+                else:
+                    mapped["exited"] += 1
+            states = {k: v for k, v in mapped.items() if v > 0}
+
+    return jsonify(states)
 
 
 # ---------------------------------------------------------------------------
@@ -620,10 +734,23 @@ def api_alerts():
         params[:-2] if conditions else [],
     )
     conn.close()
+    alerts_payload = [dict(r) for r in rows]
+
+    # If DB is empty/stale, fall back to bridge in-memory alerts.
+    if (total == 0 or not alerts_payload) and is_bridge_running():
+        bridge_raw = fetch_bridge_json("/api/alerts", params={"limit": 500})
+        if isinstance(bridge_raw, list):
+            bridge_alerts = normalize_bridge_alerts(bridge_raw)
+            if level:
+                bridge_alerts = [a for a in bridge_alerts if a.get("alert_level") == level]
+            if alert_type:
+                bridge_alerts = [a for a in bridge_alerts if a.get("alert_type") == alert_type]
+            total = len(bridge_alerts)
+            alerts_payload = bridge_alerts[offset : offset + limit]
 
     return jsonify(
         {
-            "alerts": [dict(r) for r in rows],
+            "alerts": alerts_payload,
             "total": total,
             "limit": limit,
             "offset": offset,
@@ -648,11 +775,31 @@ def api_alerts_summary():
     ).fetchall()
 
     conn.close()
+
+    by_type_map = {r["alert_type"]: r["count"] for r in by_type}
+    by_level_map = {r["alert_level"]: r["count"] for r in by_level}
+    by_camera_map = {r["camera_source"]: r["count"] for r in by_camera}
+
+    if (not by_type_map and not by_level_map) and is_bridge_running():
+        bridge_raw = fetch_bridge_json("/api/alerts", params={"limit": 1000})
+        if isinstance(bridge_raw, list) and bridge_raw:
+            bridge_alerts = normalize_bridge_alerts(bridge_raw)
+            by_type_map = defaultdict(int)
+            by_level_map = defaultdict(int)
+            by_camera_map = defaultdict(int)
+            for a in bridge_alerts:
+                by_type_map[a.get("alert_type") or "unknown"] += 1
+                by_level_map[a.get("alert_level") or "info"] += 1
+                by_camera_map[a.get("camera_source") or "unknown"] += 1
+            by_type_map = dict(by_type_map)
+            by_level_map = dict(by_level_map)
+            by_camera_map = dict(by_camera_map)
+
     return jsonify(
         {
-            "by_type": {r["alert_type"]: r["count"] for r in by_type},
-            "by_level": {r["alert_level"]: r["count"] for r in by_level},
-            "by_camera": {r["camera_source"]: r["count"] for r in by_camera},
+            "by_type": by_type_map,
+            "by_level": by_level_map,
+            "by_camera": by_camera_map,
         }
     )
 
@@ -683,6 +830,22 @@ def api_alerts_timeline():
     for r in rows:
         if r["bucket"]:
             timeline[r["bucket"]][r["alert_level"]] = r["count"]
+
+    if not timeline and is_bridge_running():
+        bridge_raw = fetch_bridge_json("/api/alerts", params={"limit": 1000})
+        if isinstance(bridge_raw, list) and bridge_raw:
+            for a in bridge_raw:
+                try:
+                    ts = datetime.fromisoformat(
+                        str(a.get("timestamp", "")).replace("Z", "+00:00")
+                    )
+                    bucket = ts.strftime("%Y-%m-%dT%H:00:00")
+                    lvl = a.get("alert_level") or "info"
+                    if lvl not in ("info", "warning", "critical"):
+                        lvl = "info"
+                    timeline[bucket][lvl] += 1
+                except Exception:
+                    continue
 
     return jsonify(
         {
@@ -1055,13 +1218,24 @@ def api_camera_stats():
     ).fetchall()
 
     conn.close()
+
+    alerts_by_camera = {r["camera_source"]: r["count"] for r in alert_cam}
+    trajectory_by_camera = {r["camera_source"]: r["count"] for r in traj_cam}
+    threats_by_camera = [dict(r) for r in threat_cam]
+
+    if not alerts_by_camera and is_bridge_running():
+        bridge_raw = fetch_bridge_json("/api/alerts", params={"limit": 1000})
+        if isinstance(bridge_raw, list):
+            temp = defaultdict(int)
+            for a in bridge_raw:
+                temp[a.get("camera_source") or "unknown"] += 1
+            alerts_by_camera = dict(temp)
+
     return jsonify(
         {
-            "alerts_by_camera": {r["camera_source"]: r["count"] for r in alert_cam},
-            "trajectory_points_by_camera": {
-                r["camera_source"]: r["count"] for r in traj_cam
-            },
-            "threats_by_camera": [dict(r) for r in threat_cam],
+            "alerts_by_camera": alerts_by_camera,
+            "trajectory_points_by_camera": trajectory_by_camera,
+            "threats_by_camera": threats_by_camera,
         }
     )
 
@@ -1091,13 +1265,41 @@ def api_live_feed():
     )
 
     conn.close()
+
+    latest_alerts_payload = [dict(r) for r in latest_alerts]
+    latest_entries_payload = [dict(r) for r in latest_entries]
+    bridge_running = is_bridge_running()
+
+    if bridge_running:
+        bridge = get_bridge()
+        if bridge:
+            inside_count = max(inside_count, int(bridge.get_stats().get("inside", 0) or 0))
+
+        if not latest_alerts_payload:
+            bridge_raw = fetch_bridge_json("/api/alerts", params={"limit": 10})
+            if isinstance(bridge_raw, list):
+                latest_alerts_payload = normalize_bridge_alerts(bridge_raw)
+
+        if not latest_entries_payload:
+            bridge_people = fetch_bridge_json("/api/people")
+            if isinstance(bridge_people, list):
+                active = [p for p in bridge_people if p.get("has_session")]
+                latest_entries_payload = [
+                    {
+                        "person_id": p.get("person_id"),
+                        "entry_time": p.get("entry_time"),
+                        "state": "inside_now",
+                    }
+                    for p in active[:10]
+                ]
+
     return jsonify(
         {
-            "latest_alerts": [dict(r) for r in latest_alerts],
-            "latest_entries": [dict(r) for r in latest_entries],
+            "latest_alerts": latest_alerts_payload,
+            "latest_entries": latest_entries_payload,
             "currently_inside": inside_count,
             "timestamp": datetime.now().isoformat(),
-            "bridge_running": is_bridge_running(),
+            "bridge_running": bridge_running,
         }
     )
 
@@ -1150,6 +1352,122 @@ def api_db_stats():
         stats[table] = safe_count(cur, f"SELECT COUNT(*) FROM {table}")
     conn.close()
     return jsonify(stats)
+
+
+# ---------------------------------------------------------------------------
+# API: Export records
+# ---------------------------------------------------------------------------
+
+
+@app.route("/api/export/records.csv")
+def api_export_records_csv():
+    """
+    Export dashboard data as CSV.
+
+    Query param:
+      - dataset: one of [all, people, alerts, threats, trajectory]
+    """
+    dataset = request.args.get("dataset", "all").strip().lower()
+    allowed = {"all", "people", "alerts", "threats", "trajectory"}
+    if dataset not in allowed:
+        return (
+            jsonify(
+                {
+                    "error": "Invalid dataset",
+                    "allowed": sorted(list(allowed)),
+                }
+            ),
+            400,
+        )
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    queries = {
+        "people": (
+            "SELECT * FROM people ORDER BY created_at DESC",
+            [
+                "person_id",
+                "temp_uuid",
+                "permanent_uuid",
+                "state",
+                "entry_time",
+                "exit_time",
+                "duration_seconds",
+                "avg_velocity",
+                "max_velocity",
+                "threat_score",
+                "alert_count",
+                "created_at",
+            ],
+        ),
+        "alerts": (
+            "SELECT * FROM alerts ORDER BY timestamp DESC",
+            [
+                "id",
+                "alert_type",
+                "alert_level",
+                "person_id",
+                "camera_source",
+                "message",
+                "timestamp",
+                "acknowledged",
+                "metadata",
+            ],
+        ),
+        "threats": (
+            "SELECT * FROM threat_events ORDER BY timestamp DESC",
+            [
+                "id",
+                "person_id",
+                "event_type",
+                "threat_score",
+                "velocity",
+                "trajectory_entropy",
+                "proximity_density",
+                "timestamp",
+                "camera_source",
+                "metadata",
+            ],
+        ),
+        "trajectory": (
+            "SELECT * FROM trajectory_data ORDER BY timestamp DESC",
+            ["id", "person_id", "camera_source", "x", "y", "timestamp", "velocity"],
+        ),
+    }
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    datasets = ["people", "alerts", "threats", "trajectory"] if dataset == "all" else [dataset]
+    multi_dataset = len(datasets) > 1
+
+    for i, ds in enumerate(datasets):
+        query, columns = queries[ds]
+        rows = cur.execute(query).fetchall()
+
+        if multi_dataset:
+            writer.writerow([f"[{ds.upper()}]"])
+
+        writer.writerow(columns)
+        for r in rows:
+            writer.writerow([r[c] for c in columns])
+
+        if multi_dataset and i < len(datasets) - 1:
+            writer.writerow([])
+
+    conn.close()
+
+    csv_body = output.getvalue()
+    output.close()
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"security_records_{dataset}_{ts}.csv"
+    return Response(
+        csv_body,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ---------------------------------------------------------------------------

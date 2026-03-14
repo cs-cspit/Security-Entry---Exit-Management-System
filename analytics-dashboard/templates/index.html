@@ -343,9 +343,64 @@
 
         /* Mini sparkline */
         .sparkline-container { height: 40px; width: 100%; }
+
+        /* Real-time alert toasts */
+        .toast-container {
+            position: fixed;
+            top: 84px;
+            right: 18px;
+            z-index: 80;
+            width: min(360px, calc(100vw - 36px));
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            pointer-events: none;
+        }
+        .toast {
+            pointer-events: auto;
+            background: linear-gradient(135deg, rgba(26, 31, 53, 0.96), rgba(17, 24, 39, 0.98));
+            border: 1px solid var(--border-color);
+            border-left-width: 4px;
+            border-radius: 12px;
+            padding: 10px 12px;
+            box-shadow: 0 14px 30px rgba(0,0,0,0.35);
+            transform: translateX(16px);
+            opacity: 0;
+            animation: toastIn 220ms ease forwards;
+        }
+        .toast.info { border-left-color: #3b82f6; }
+        .toast.warning { border-left-color: #f59e0b; }
+        .toast.critical { border-left-color: #ef4444; }
+        .toast-title {
+            font-size: 0.76rem;
+            font-weight: 700;
+            color: #e2e8f0;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .toast-body {
+            font-size: 0.82rem;
+            color: #94a3b8;
+            margin-top: 4px;
+            line-height: 1.25rem;
+        }
+        .toast-meta {
+            margin-top: 6px;
+            font-size: 0.69rem;
+            color: #64748b;
+        }
+        .toast.fade-out {
+            animation: toastOut 200ms ease forwards;
+        }
+        @keyframes toastIn {
+            to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes toastOut {
+            to { transform: translateX(12px); opacity: 0; }
+        }
     </style>
 </head>
-<body>
+<body data-bridge-running="{% if bridge_running %}true{% else %}false{% endif %}">
     <div class="bg-mesh"></div>
 
     <!-- Sidebar Navigation -->
@@ -428,6 +483,10 @@
                     <button onclick="refreshAll()" class="px-3 py-2 rounded-lg bg-[#1a1f35] border border-[#2a3150] text-[#94a3b8] hover:text-white hover:border-blue-500/40 transition text-sm flex items-center gap-2">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                         Refresh
+                    </button>
+                    <button onclick="exportRecords()" class="px-3 py-2 rounded-lg bg-[#1a1f35] border border-[#2a3150] text-[#94a3b8] hover:text-white hover:border-emerald-500/40 transition text-sm flex items-center gap-2" title="Export records as CSV">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v10m0 0l-4-4m4 4l4-4M4 20h16"/></svg>
+                        Export Records
                     </button>
                 </div>
             </div>
@@ -1005,6 +1064,9 @@
         </div><!-- end .p-6 -->
     </main>
 
+    <!-- Real-time Alert Notifications -->
+    <div id="toast-container" class="toast-container"></div>
+
     <!-- Person Detail Slide Panel -->
     <div class="detail-overlay" id="detail-overlay" onclick="closeDetailPanel()"></div>
     <div class="detail-panel" id="detail-panel">
@@ -1020,7 +1082,6 @@
     <!-- ================================================================== -->
     <!-- JAVASCRIPT -->
     <!-- ================================================================== -->
-    {% raw %}
     <script>
         const API = '';  // Same origin
         let chartInstances = {};
@@ -1030,7 +1091,9 @@
         const PAGE_SIZE = 25;
         let liveInterval = null;
         let autoRefreshInterval = null;
-        let bridgeRunning = {{ 'true' if bridge_running else 'false' }};
+        let bridgeRunning = document.body.dataset.bridgeRunning === 'true';
+        let latestAlertIdSeen = 0;
+        let realtimeAlertInterval = null;
 
         // ---- Helpers ----
         function fmt(n) { return n != null ? Number(n).toLocaleString() : '--'; }
@@ -1058,6 +1121,10 @@
             const icon = { info:'ℹ️', warning:'⚠️', critical:'🚨' };
             return `<span class="badge ${cls[level]||'badge-info'}">${icon[level]||''} ${level}</span>`;
         }
+        function alertLevelIcon(level) {
+            const icon = { info:'🔵', warning:'🟡', critical:'🔴' };
+            return icon[level] || '⚪';
+        }
         function stateBadge(state) {
             const labels = { inside_now:'Inside', exited:'Exited', unauthorized:'Unauthorized', waiting_to_enter:'Waiting' };
             return `<span class="badge state-${state}">${labels[state]||state}</span>`;
@@ -1077,6 +1144,15 @@
         }
         function updateTimestamp() {
             document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+        }
+        function escapeHTML(value) {
+            return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }[char]));
         }
 
         // ---- Chart defaults ----
@@ -1372,7 +1448,7 @@
                 } else {
                     container.innerHTML = latestAlerts.alerts.map(a => `
                         <div class="flex items-start gap-3 p-3 rounded-lg hover:bg-[rgba(59,130,246,0.05)] transition">
-                            <div class="mt-0.5">${{info:'🔵',warning:'🟡',critical:'🔴'}[a.alert_level]||'⚪'}</div>
+                            <div class="mt-0.5">${alertLevelIcon(a.alert_level)}</div>
                             <div class="flex-1 min-w-0">
                                 <div class="flex items-center gap-2">
                                     ${levelBadge(a.alert_level)}
@@ -2000,7 +2076,7 @@
             } else {
                 streamDiv.innerHTML = data.latest_alerts.map(a => `
                     <div class="flex items-start gap-3 p-3 rounded-lg bg-[#111827]/50 border border-[#2a3150]/50 transition hover:border-[#3a4170]">
-                        <div class="mt-0.5 text-lg">${{info:'🔵',warning:'🟡',critical:'🔴'}[a.alert_level]||'⚪'}</div>
+                        <div class="mt-0.5 text-lg">${alertLevelIcon(a.alert_level)}</div>
                         <div class="flex-1 min-w-0">
                             <div class="flex items-center gap-2 flex-wrap">
                                 ${levelBadge(a.alert_level)}
@@ -2021,6 +2097,59 @@
         }
         function stopLiveUpdates() {
             if (liveInterval) { clearInterval(liveInterval); liveInterval = null; }
+        }
+
+        // ================================================================
+        // REAL-TIME ALERT NOTIFICATIONS
+        // ================================================================
+        function showAlertToast(alert) {
+            const container = document.getElementById('toast-container');
+            if (!container) return;
+
+            const level = (alert.alert_level || 'info').toLowerCase();
+            const toast = document.createElement('div');
+            toast.className = `toast ${level}`;
+            toast.innerHTML = `
+                <div class="toast-title">${escapeHTML(level)} alert</div>
+                <div class="toast-body">${escapeHTML(alert.message || alert.alert_type || 'New alert detected')}</div>
+                <div class="toast-meta">${escapeHTML((alert.camera_source || '').replace(/_/g, ' '))}${alert.person_id ? ' · ' + escapeHTML(alert.person_id) : ''} · ${escapeHTML(fmtTime(alert.timestamp))}</div>
+            `;
+
+            container.prepend(toast);
+            const toRemove = Array.from(container.children).slice(6);
+            toRemove.forEach(el => el.remove());
+
+            setTimeout(() => {
+                toast.classList.add('fade-out');
+                setTimeout(() => toast.remove(), 220);
+            }, 5600);
+        }
+
+        async function pollRealtimeAlerts() {
+            const data = await fetchJSON('/api/alerts?limit=10');
+            if (!data || !Array.isArray(data.alerts)) return;
+
+            // First fetch initializes baseline so stale historical alerts do not spam toasts.
+            if (!latestAlertIdSeen) {
+                latestAlertIdSeen = Math.max(0, ...data.alerts.map(a => Number(a.id) || 0));
+                return;
+            }
+
+            const fresh = data.alerts
+                .filter(a => (Number(a.id) || 0) > latestAlertIdSeen)
+                .sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+
+            if (fresh.length > 0) {
+                latestAlertIdSeen = Math.max(latestAlertIdSeen, ...fresh.map(a => Number(a.id) || 0));
+                fresh.slice(-3).forEach(showAlertToast);
+                await refreshAll();
+            }
+        }
+
+        function startRealtimeAlertPolling() {
+            if (realtimeAlertInterval) clearInterval(realtimeAlertInterval);
+            pollRealtimeAlerts();
+            realtimeAlertInterval = setInterval(pollRealtimeAlerts, 3000);
         }
 
         // ================================================================
@@ -2066,7 +2195,35 @@
         // ================================================================
         async function refreshAll() {
             await loadOverview();
+
+            const activeSectionEl = document.querySelector('.dashboard-section.active');
+            const activeSection = activeSectionEl ? activeSectionEl.id.replace('section-', '') : 'overview';
+            if (activeSection === 'people') await loadPeople();
+            if (activeSection === 'alerts') await loadAlerts();
+            if (activeSection === 'threats') await loadThreats();
+            if (activeSection === 'velocity') await loadVelocity();
+            if (activeSection === 'heatmap') await loadHeatmap('room_camera');
+            if (activeSection === 'cameras') await loadCameras();
+            if (activeSection === 'live') await loadLive();
+
             updateTimestamp();
+        }
+
+        function exportRecords() {
+            const activeSectionEl = document.querySelector('.dashboard-section.active');
+            const activeSection = activeSectionEl ? activeSectionEl.id.replace('section-', '') : 'overview';
+            const datasetBySection = {
+                overview: 'all',
+                people: 'people',
+                alerts: 'alerts',
+                threats: 'threats',
+                velocity: 'people',
+                heatmap: 'trajectory',
+                cameras: 'all',
+                live: 'alerts'
+            };
+            const dataset = datasetBySection[activeSection] || 'all';
+            window.location.href = `/api/export/records.csv?dataset=${encodeURIComponent(dataset)}`;
         }
 
         async function resetDatabase() {
@@ -2096,8 +2253,8 @@
         window.addEventListener('DOMContentLoaded', () => {
             loadOverview();
             startAutoRefresh();
+            startRealtimeAlertPolling();
         });
     </script>
-    {% endraw %}
 </body>
 </html>
