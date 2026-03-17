@@ -5,65 +5,12 @@ YOLO26 Complete Three-Camera Security System
 Three-camera security system with full YOLO26 model suite for robust
 person detection, face identification, body segmentation, and pose tracking.
 
-Three-model architecture (all YOLO26 family):
-  ┌─────────────────────────────────────────────────────────────────┐
-  │ Model                │ File                  │ Role             │
-  ├─────────────────────────────────────────────────────────────────┤
-  │ YOLO26 Face (custom) │ yolo26n-face.pt       │ Face detection   │
-  │                      │ (trained on faces)    │ (dedicated high- │
-  │                      │                       │  res face crop)  │
-  ├─────────────────────────────────────────────────────────────────┤
-  │ YOLO26 Segmentation  │ yolo26n-seg.pt        │ Pixel-level body │
-  │                      │                       │ masks → precise  │
-  │                      │                       │ clothing/hair    │
-  │                      │                       │ colour extraction│
-  ├─────────────────────────────────────────────────────────────────┤
-  │ YOLO26 Pose          │ yolo26n-pose.pt       │ Body bbox + 17   │
-  │                      │                       │ keypoints for    │
-  │                      │                       │ tracking & gait  │
-  ├─────────────────────────────────────────────────────────────────┤
-  │ YOLO26 Body Detect   │ yolo26n.pt            │ Body-level re-ID │
-  │                      │                       │ (general detect) │
-  └─────────────────────────────────────────────────────────────────┘
-
-Why four models?
-  - People wearing identical uniforms (e.g. CISF) cannot be distinguished
-    by body/clothing colour alone.  A CUSTOM-TRAINED face detector
-    (yolo26n-face.pt) runs on a zoomed face crop at entry AND room,
-    giving a reliable biometric signal that is independent of clothing.
-    Unlike the generic COCO model (yolo26n.pt), this model is trained
-    specifically on face data and outputs class 0 = "face".
-  - The generic yolo26n.pt is used for body-level re-ID (OSNet).
-  - Segmentation masks isolate the exact pixels of a garment, removing
-    background bleed that corrupts histogram-based colour matching.
-  - Pose keypoints feed ByteTrack for stable multi-person track IDs and
-    provide gait/shoulder-width features that complement face+colour.
-
-Re-ID pipeline per camera:
-  Entry  → detect (person bbox) → seg mask → face embed → OSNet → register
-  Room   → pose track (ByteTrack) → face embed → OSNet → match registered
-  Exit   → detect → face embed (primary) → OSNet (fallback) → match + exit
-
-Features:
-✅ YOLO26-pose body detection + 17-keypoint pose (ByteTrack room tracking)
-✅ YOLO26-seg instance segmentation masks (precise clothing/hair colour)
-✅ YOLO26-detect dedicated face crops at entry, room, and exit
-✅ InsightFace ArcFace 512-D face embeddings (primary re-ID signal)
-✅ OSNet appearance embedding (secondary re-ID signal)
-✅ Hair colour + skin tone + clothing colour from segmentation masks
-✅ Cross-camera adaptive threshold (entry→room domain shift compensation)
-✅ ByteTrack multi-person tracking with persistent track→person mapping
-✅ Loitering / Tailgating / Panic behaviour detection
-✅ Velocity tracking with real-time colour-coded display
-✅ REST API + WebSocket + MJPEG streams
-✅ Complete entry → room → exit pipeline with session management
-
-Controls:
-    E - Force register at entry (auto-register is default)
-    D - Toggle debug output
-    C - Clear all registrations
-    Q - Quit and export session data
-    S - Show statistics
+Model Roles:
+- YOLO26-pose (yolo26n-pose.pt): Body detection + 17 keypoints + ByteTrack.
+- YOLO26-face (yolo26n-face.pt): Custom-trained face detection.
+- YOLO26-seg (yolo26n-seg.pt): Segmentation masks for color extraction.
+- YOLO26-threat (best.pt): Weapon detection.
+- YOLO26-clothes (best.pt): Custom clothes detection for re-ID.
 """
 
 import os
@@ -71,7 +18,7 @@ import signal
 import sys
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
@@ -90,94 +37,37 @@ try:
     from features.osnet_extractor import OSNetExtractor
 except ImportError as e:
     print(f"❌ Import Error: {e}")
-    print(
-        "\n💡 Make sure you're in the project directory and have installed dependencies:"
-    )
-    print("   pip install ultralytics opencv-python numpy torch torchvision")
     sys.exit(1)
 
-# ── YOLO26 multi-model imports ────────────────────────────────────────────────
-# We use three distinct YOLO26 model variants, each specialised for one role:
-#   yolo26n.pt      — detection model  → face detection on zoomed crops
-#   yolo26n-seg.pt  — segmentation     → pixel-level body/clothing masks
-#   yolo26n-pose.pt — pose estimation  → body bbox + 17 keypoints + ByteTrack
-# All three are loaded lazily in __init__ with graceful fallbacks.
 try:
     from ultralytics import YOLO as _YOLO26
-
     _YOLO26_AVAILABLE = True
 except ImportError:
     _YOLO26_AVAILABLE = False
-    _YOLO26 = None  # type: ignore
-    print("⚠️  ultralytics not found — YOLO26 face-detect and seg models disabled")
+    _YOLO26 = None
 
-# ── Phase 6: Multi-person tracker (YOLO26 built-in ByteTrack) ────────────────
 try:
     from tracking.multi_tracker import MultiPersonTracker, TrackedPerson
-
     _TRACKER_AVAILABLE = True
 except ImportError:
     _TRACKER_AVAILABLE = False
-    print("⚠️  MultiPersonTracker not found — room camera uses frame-by-frame detection")
 
-# ── Phase 7: Behavior detectors ──────────────────────────────────────────────
 try:
     from behaviors.loitering_detector import LoiteringDetector
     from behaviors.tailgating_detector import TailgatingDetector
-
     _BEHAVIORS_AVAILABLE = True
 except ImportError:
     _BEHAVIORS_AVAILABLE = False
-    print("⚠️  Behavior detectors not found — loitering/tailgating checks disabled")
 
-# ── Phase 7: WebSocket / REST API bridge (optional) ──────────────────────────
 try:
     from api.websocket_bridge import SecurityAPIBridge
-
     _API_BRIDGE_AVAILABLE = True
 except ImportError:
     _API_BRIDGE_AVAILABLE = False
-    SecurityAPIBridge = None  # type: ignore
+    SecurityAPIBridge = None
 
 
 class YOLO26CompleteSystem:
-    """
-    Complete three-camera security system using the full YOLO26 model suite.
-
-    Model roles
-    -----------
-    self.detector          YOLO26BodyDetector(yolo26n-pose.pt)
-                           Primary person detector — body bounding boxes,
-                           17-point COCO keypoints, drives ByteTrack.
-
-    self.face_detector     YOLO26(yolo26n-face.pt)  [custom-trained face model]
-                           Dedicated face detector trained on face data.
-                           Outputs class 0 = "face".  Runs on a zoomed
-                           head-region crop extracted from the pose
-                           keypoints, giving sub-pixel-accurate face boxes
-                           that InsightFace then embeds.  Used at entry,
-                           room, AND exit — critical for uniform scenarios.
-
-    self.seg_model         YOLO26(yolo26n-seg.pt)  [segmentation variant]
-                           Produces pixel-level instance masks for each
-                           detected person.  The mask is used to isolate
-                           exact clothing pixels before colour histogram
-                           extraction, eliminating background bleed that
-                           would otherwise corrupt the appearance vector.
-
-    Phase 6 additions:
-      - MultiPersonTracker (YOLO26-pose + ByteTrack) for stable room IDs
-      - Per-track OSNet embedding aggregation (temporal mean pooling)
-      - Track → Person association persisted across occlusions
-
-    Phase 7 additions:
-      - LoiteringDetector: zone-based dwell-time alerts
-      - TailgatingDetector: rapid successive entry detection
-      - Panic behaviour detection (crowd avg velocity)
-      - Enhanced AlertManager: Telegram + WebSocket channels
-      - SecurityAPIBridge: FastAPI REST + WebSocket + MJPEG streams
-    """
-
     def __init__(
         self,
         entry_idx=0,
@@ -189,2596 +79,509 @@ class YOLO26CompleteSystem:
         """Initialize the complete system."""
         print("\n" + "=" * 70)
         print("  YOLO26 COMPLETE THREE-CAMERA SECURITY SYSTEM")
-        print("  Phases 1-7 Active  |  Three-Model YOLO26 Suite")
         print("=" * 70)
-        print(
-            "✅ YOLO26-pose  (yolo26n-pose.pt) — body bbox + 17 keypoints + ByteTrack"
-        )
-        print(
-            "✅ YOLO26-face  (yolo26n-face.pt)  — custom-trained face detection on head crops"
-        )
-        print(
-            "✅ YOLO26-seg   (yolo26n-seg.pt)  — pixel masks → precise clothing colour"
-        )
-        print("✅ InsightFace ArcFace 512-D face embeddings (uniform-proof re-ID)")
-        print("✅ OSNet appearance embedding (body-level secondary signal)")
-        print("✅ ByteTrack multi-person tracking with persistent track→person mapping")
-        print("✅ Loitering / Tailgating / Panic behaviour detection")
-        print("✅ Velocity tracking with real-time display")
-        print("✅ REST API + WebSocket + MJPEG streams")
-        print("✅ Complete entry → room → exit pipeline\n")
 
         self.running = True
         self.entry_idx = entry_idx
         self.room_idx = room_idx
         self.exit_idx = exit_idx
 
-        print(f"📹 Camera Assignment:")
-        print(f"   Entry: Camera {entry_idx}")
-        print(f"   Room:  Camera {room_idx}")
-        print(f"   Exit:  Camera {exit_idx}")
-        print()
-
         # System settings
         self.debug_mode = False
         self.auto_register = True
-        self.pixels_per_meter = (
-            100.0  # Calibration: pixels per meter (adjust for your camera)
-        )
+        self.pixels_per_meter = 100.0
 
-        # ── Model 1: YOLO26-pose — body detection + keypoints + ByteTrack ────
-        print("🔧 Loading YOLO26-pose model (body detection + keypoints)...")
-        self.detector = YOLO26BodyDetector(
-            model_name="yolo26n-pose.pt", confidence_threshold=0.5, device="auto"
-        )
-        print()
-
-        # ── Resolve compute device once for all supplementary models ─────────
         import torch as _torch
+        _dev = "cuda" if _torch.cuda.is_available() else "mps" if _torch.backends.mps.is_available() else "cpu"
 
-        _dev = (
-            "cuda"
-            if _torch.cuda.is_available()
-            else "mps"
-            if _torch.backends.mps.is_available()
-            else "cpu"
-        )
+        # ── Model 1: YOLO26-pose (Body + Pose) ───────────────────────────────
+        print("🔧 Loading YOLO26-pose model...")
+        self.detector = YOLO26BodyDetector(model_name="yolo26n-pose.pt", device=_dev)
 
-        # ── Model 2: YOLO26-face — CUSTOM-TRAINED dedicated face detector ────
-        # Uses your custom-trained model (yolo26n-face.pt) which was trained
-        # specifically on face data.  Class 0 = "face".  This replaces the
-        # generic COCO yolo26n.pt that could only detect "person" class and
-        # was a major source of false positives (it couldn't reliably find
-        # faces in head crops because it wasn't trained for that task).
-        #
-        # Fallback chain:
-        #   1. yolo26n-face.pt (custom trained — preferred)
-        #   2. custom_models/yolo26_face_results/weights/best.pt (source weights)
-        #   3. yolo26n.pt (generic COCO — worst for face detection)
+        # ── Model 2: YOLO26-face (Custom Face Detection) ─────────────────────
         self.face_detect_model = None
         if _YOLO26_AVAILABLE:
-            _face_model_candidates = [
-                "yolo26n-face.pt",
-                os.path.join(
-                    "custom_models", "yolo26_face_results", "weights", "best.pt"
-                ),
-                "yolo26n.pt",  # last resort fallback
-            ]
-            _face_det_path = None
-            for _candidate in _face_model_candidates:
-                if os.path.exists(_candidate):
-                    _face_det_path = _candidate
-                    break
-
-            if _face_det_path is not None:
-                try:
-                    _is_custom = "face" in _face_det_path.lower()
-                    _label = (
-                        "custom-trained face"
-                        if _is_custom
-                        else "generic COCO (fallback)"
-                    )
-                    print(
-                        f"🔧 Loading YOLO26-face model ({_label}): {_face_det_path}..."
-                    )
-                    self.face_detect_model = _YOLO26(_face_det_path)
-                    self.face_detect_model.to(_dev)
-                    # Store whether this is the custom face model so
-                    # _detect_face_on_head_crop knows what class to look for
-                    self._face_model_is_custom = _is_custom
-                    print(
-                        f"✅ YOLO26-face model loaded on {_dev} [{'CUSTOM' if _is_custom else 'GENERIC'}]"
-                    )
-                except Exception as _e:
-                    print(f"⚠️  YOLO26-face model unavailable: {_e}")
-                    print("   Face localisation will fall back to pose-keypoint crops.")
-                    self.face_detect_model = None
-                    self._face_model_is_custom = False
+            _face_path = "yolo26n-face.pt"
+            if os.path.exists(_face_path):
+                print(f"🔧 Loading YOLO26-face model: {_face_path}...")
+                self.face_detect_model = _YOLO26(_face_path)
+                self.face_detect_model.to(_dev)
+                self._face_model_is_custom = True
             else:
-                print(
-                    "⚠️  No face detection model found — face localisation will use keypoint crops only"
-                )
                 self._face_model_is_custom = False
-        else:
-            print("⚠️  ultralytics unavailable — YOLO26-face model skipped")
-            self._face_model_is_custom = False
-        print()
 
-        # ── Model 3: YOLO26-seg — instance segmentation for clothing masks ───
-        # The segmentation model produces a pixel mask per person.  We use
-        # that mask to extract ONLY the clothing pixels before computing colour
-        # histograms, eliminating background and skin bleed that degrades
-        # appearance matching (especially for people in similar uniforms).
+        # ── Model 3: YOLO26-seg (Segmentation) ───────────────────────────────
         self.seg_model = None
         if _YOLO26_AVAILABLE:
-            _seg_path = "yolo26n-seg.pt"
-            try:
-                print(
-                    f"🔧 Loading YOLO26-seg model for clothing masks ({_seg_path})..."
-                )
-                self.seg_model = _YOLO26(_seg_path)
+            if os.path.exists("yolo26n-seg.pt"):
+                print("🔧 Loading YOLO26-seg model...")
+                self.seg_model = _YOLO26("yolo26n-seg.pt")
                 self.seg_model.to(_dev)
-                print(f"✅ YOLO26-seg model loaded on {_dev}")
-            except Exception as _e:
-                print(f"⚠️  YOLO26-seg model unavailable: {_e}")
-                print("   Clothing colour will fall back to raw bbox crops.")
-                self.seg_model = None
-        else:
-            print("⚠️  ultralytics unavailable — YOLO26-seg model skipped")
-        print()
 
-        # ── Phase 6: Multi-person tracker ────────────────────────────────────
+        # ── Model 4: YOLO26-threat (Weapon Detection) ────────────────────────
+        self.threat_model = None
+        if _YOLO26_AVAILABLE:
+            _threat_path = os.path.join("custom_models", "yolov26n-threat_detection", "weights", "best.pt")
+            if os.path.exists(_threat_path):
+                try:
+                    print(f"🔧 Loading YOLO26-threat model (weapons): {_threat_path}...")
+                    self.threat_model = _YOLO26(_threat_path)
+                    self.threat_model.to(_dev)
+                    print(f"✅ YOLO26-threat model loaded on {_dev}")
+                except Exception as _e:
+                    print(f"⚠️  YOLO26-threat model unavailable: {_e}")
+
+        # ── Model 5: YOLO26-clothes (Custom Clothes Detection) ───────────────
+        self.clothes_model = None
+        if _YOLO26_AVAILABLE:
+            _clothes_path = os.path.join("custom_models", "yolov26n-clothes_detection", "weights", "best.pt")
+            if os.path.exists(_clothes_path):
+                try:
+                    print(f"🔧 Loading YOLO26-clothes model: {_clothes_path}...")
+                    self.clothes_model = _YOLO26(_clothes_path)
+                    self.clothes_model.to(_dev)
+                    print(f"✅ YOLO26-clothes model loaded on {_dev}")
+                except Exception as _e:
+                    print(f"⚠️  YOLO26-clothes model unavailable: {_e}")
+
+        # Multi-person tracker
         if _TRACKER_AVAILABLE:
-            print("🔧 Loading dedicated room-camera detector for ByteTrack...")
-            # IMPORTANT: the room tracker MUST use its own YOLO26-pose instance.
-            # Entry/exit cameras call model.predict() on self.detector; if the
-            # tracker shared that instance, those predict() calls would reset
-            # ByteTrack's internal predictor state every frame → 0 room detections.
-            # A dedicated instance keeps track() and predict() completely isolated.
-            self._room_detector = YOLO26BodyDetector(
-                model_name="yolo26n-pose.pt",
-                confidence_threshold=0.5,
-                device="auto",
-            )
-            print("🔧 Initializing multi-person tracker (ByteTrack)...")
-            self.multi_tracker = MultiPersonTracker(
-                detector=self._room_detector,
-                tracker_type="bytetrack",
-                lost_track_timeout=30.0,
-            )
-            print("✅ ByteTrack tracker ready (stable IDs across occlusions)\n")
+            self._room_detector = YOLO26BodyDetector(model_name="yolo26n-pose.pt", device=_dev)
+            self.multi_tracker = MultiPersonTracker(detector=self._room_detector)
         else:
-            self._room_detector = None
             self.multi_tracker = None
-            print("⚠️  Multi-tracker unavailable — frame-by-frame detection only\n")
 
-        # ── Seg-model helper: extract masked body crop ────────────────────────
-        # Called from register_person and match_person to get a clothing-only
-        # image crop using the YOLO26-seg instance mask.
-        self._seg_conf_threshold = 0.45  # minimum mask confidence
-
-        # Initialize feature extractors
-        print("🔧 Loading feature extractors...")
-        self.osnet = OSNetExtractor(device="auto")
-        self.body_analyzer = BodyOnlyAnalyzer()
-
-        # Initialize face recognition (Phase 5)
-        print("🔧 Loading face recognition (InsightFace)...")
-        try:
-            self.face_recognizer = FaceRecognitionExtractor(
-                model_name="buffalo_sc",  # Smaller, faster model
-                det_size=(640, 640),
-            )
-            self.use_face_recognition = self.face_recognizer.is_initialized()
-            if self.use_face_recognition:
-                print("✅ Face recognition enabled!")
-                print("   - Entry gate: Face + Body matching")
-                print("   - Exit gate: Face-first matching (fallback to body)")
-            else:
-                print("⚠️  Face recognition disabled (initialization failed)")
-        except Exception as e:
-            print(f"⚠️  Face recognition not available: {e}")
-            print("   System will use body-only matching")
-            self.face_recognizer = None
-            self.use_face_recognition = False
-
-        # Initialize cross-camera adapter
-        print("🔧 Loading cross-camera adapter...")
+        # Feature extractors
+        self.osnet = OSNetExtractor(device=_dev)
+        # self.body_analyzer = BodyOnlyAnalyzer()  # Replaced by clothes_model for color/features
+        self.face_recognizer = FaceRecognitionExtractor(model_name="buffalo_sc")
+        self.use_face_recognition = self.face_recognizer.is_initialized()
         self.cross_camera = CrossCameraAdapter()
-        print()
-
-        # Initialize database
         self.database = EnhancedDatabase("data/yolo26_complete_system.db")
 
-        # ── Phase 7: API Bridge (optional) ───────────────────────────────────
+        # API Bridge
         self.api_bridge = None
         if enable_api and _API_BRIDGE_AVAILABLE:
-            print("🔧 Starting REST / WebSocket API bridge...")
-            self.api_bridge = SecurityAPIBridge(
-                system_ref=self,
-                port=api_port,
-                cors_origins=[
-                    "http://localhost:3000",
-                    "http://localhost:5173",
-                    "http://localhost:8080",
-                    "http://localhost:5050",  # Flask analytics dashboard
-                    "http://127.0.0.1:5050",  # Flask analytics dashboard (loopback)
-                ],
-            )
+            self.api_bridge = SecurityAPIBridge(system_ref=self, port=api_port)
             self.api_bridge.start()
-            print(f"✅ API bridge running → http://localhost:{api_port}\n")
-        elif enable_api:
-            print("⚠️  API bridge skipped — install fastapi uvicorn to enable\n")
 
-        # ── Phase 7: Alert Manager with Telegram + WebSocket ─────────────────
-        self.alert_manager = AlertManager(
-            cooldown_seconds=5.0,
-            console_output=True,
-            file_logging=True,
-            log_path="data/yolo26_system_alerts.log",
-            rules_path="configs/alert_rules.yaml",
-            api_bridge=self.api_bridge,
-        )
+        # Alert Manager
+        self.alert_manager = AlertManager(api_bridge=self.api_bridge)
 
-        # Person registry
-        self.registered_people = {}  # {person_id: profile}
-        self.active_sessions = {}  # {person_id: session_info}
-        self.person_status = {}  # {person_id: 'active' or 'exited'}
+        # Registry & Stats
+        self.registered_people = {}
+        self.active_sessions = {}
+        self.person_status = {}
         self.person_counter = 0
-
-        # Tracking data
-        self.trajectories = defaultdict(list)  # {person_id: [(x, y, time), ...]}
-        self.velocity_data = defaultdict(list)  # {person_id: [velocities]}
-        self.last_detection_time = defaultdict(float)
-
-        # Temporal smoothing - track last N frames for each detection
-        self.detection_history = defaultdict(
-            list
-        )  # {detection_key: [(person_id, similarity), ...]}
-        self.temporal_window = 3  # Require 3-frame majority
-        self.stable_ids = {}  # {detection_key: person_id} - confirmed IDs
-
-        # ── Phase 6: track_id → person_id mapping (for display & DB) ─────────
-        # Maintained separately so the room camera can label unregistered tracks.
-        #
-        # TTL design notes
-        # ----------------
-        # A short TTL (≤ 2 s) caused the "flash green → stay red" symptom:
-        #   frame 0: no cache → full match → succeeds → green ✓
-        #   frame 2s+1: cache expired → full match → OSNet domain-shift → red ✗
-        # Fix: use a long TTL so a successful face match sticks for the whole
-        # time the person is continuously tracked.  The cache is invalidated
-        # explicitly when a track_id disappears (ByteTrack lost-track event)
-        # rather than relying on wall-clock expiry alone.
-        self._track_match_cache: dict = {}  # {track_id: (person_id, similarity, ts)}
-        self._track_cache_ttl: float = (
-            30.0  # seconds — long enough for continuous track
-        )
-        # Set of track_ids that matched successfully via face — these are "pinned"
-        # and will NOT be re-evaluated until the track is lost.
-        self._face_confirmed_tracks: set = set()
-
-        # ── Phase 7: Behavior detectors ───────────────────────────────────────
-        if _BEHAVIORS_AVAILABLE:
-            self.loitering = LoiteringDetector(
-                loitering_threshold=60.0,
-                zone_size=100,
-                alert_cooldown=30.0,
-            )
-            self.tailgating = TailgatingDetector(
-                time_window=5.0,
-                min_persons=2,
-                check_proximity=True,
-            )
-            print("✅ Behavior detectors ready (loitering + tailgating)\n")
-        else:
-            self.loitering = None
-            self.tailgating = None
-
-        # Panic detection state (crowd velocity tracking)
-        self._crowd_velocity_window: list = []  # rolling window of per-person velocities
-        self._panic_person_threshold: int = 3  # min persons before panic check
-        self._panic_velocity_threshold: float = 3.0  # m/s crowd average
-
-        # Entry cooldown (prevent duplicate registrations)
-        self.entry_cooldown = {}
-        self.entry_cooldown_seconds = (
-            10.0  # Increased to prevent duplicate registrations
-        )
-        self.last_entry_person_bbox = None  # Track last registered person's bbox
-        self.entry_area_threshold = 0.2  # 20% overlap = same person (more lenient)
-
-        # Feature weights for matching (REBALANCED for custom face model)
-        # With yolo26n-face.pt custom model, face detections are much more
-        # reliable than before.  Face signal is now the primary discriminator.
-        # OSNet provides strong secondary confirmation.
-        self.osnet_weight = 0.65  # Strong secondary signal
-        self.hair_weight = 0.05  # Weak — too similar across uniformed people
-        self.skin_weight = 0.05  # Weak — too similar across people
-        self.clothing_weight = 0.25  # Moderate — helps when face unavailable
-
-        # Hard OSNet minimum threshold - reject if OSNet alone is too low
-        # This prevents matches based purely on appearance when body features don't match
-        self.min_osnet_threshold = 0.45  # OSNet must be at least 0.45 for any match
-
-        # Face recognition weights (Phase 5 — boosted for custom face model)
-        # The custom yolo26n-face.pt produces dramatically better face crops
-        # than the old generic COCO model, so face matching is now more
-        # trustworthy and should carry more weight.
-        self.face_weight = 0.70  # INCREASED — custom face model is highly reliable
-        self.face_threshold = 0.40  # Slightly lower — custom model gives cleaner crops
-        self.use_face_at_entry = True  # Always try to capture face at entry
-        self.use_face_at_exit = True  # Face-first matching at exit
-
-        # NOTE: Thresholds are now managed by CrossCameraAdapter!
-        # These are fallback values only
-        self.similarity_threshold = 0.38  # Fallback for room (managed by adapter)
-        self.exit_threshold = 0.42  # Fallback for exit (managed by adapter)
-        self.confidence_gap = 0.15  # Fallback confidence gap
-        self.exit_confidence_gap = 0.10  # Fallback exit gap
-
-        # Statistics
+        self.trajectories = defaultdict(list)
+        self.velocity_data = defaultdict(list)
         self.stats = {
-            "registered": 0,
-            "inside": 0,
-            "exited": 0,
-            "unauthorized": 0,
-            "total_detections": 0,
-            "entry_detections": 0,
-            "room_detections": 0,
-            "exit_detections": 0,
+            "registered": 0, "inside": 0, "exited": 0, "unauthorized": 0,
+            "total_detections": 0, "entry_detections": 0, "room_detections": 0, "exit_detections": 0,
         }
 
-        # Open cameras
-        self._init_cameras()
+        # Track management
+        self._track_match_cache = {}
+        self._track_cache_ttl = 30.0
+        self._face_confirmed_tracks = set()
+        self._unauthorized_track_ids = set()
 
-        # Signal handler
+        # Behavior detectors
+        if _BEHAVIORS_AVAILABLE:
+            self.loitering = LoiteringDetector()
+            self.tailgating = TailgatingDetector()
+        else:
+            self.loitering = self.tailgating = None
+
+        self._panic_person_threshold = 3
+        self._panic_velocity_threshold = 3.0
+
+        # Entry cooldown
+        self.entry_cooldown = {}
+        self.entry_cooldown_seconds = 10.0
+        self.last_entry_person_bbox = None
+        self.entry_area_threshold = 0.2
+
+        # Matching Weights & Thresholds
+        self.osnet_weight = 0.50
+        self.clothes_weight = 0.25  # From YOLO26-clothes
+        self.face_weight = 0.80     # Heavily weighted
+        
+        self.face_threshold = 0.35  # More lenient for re-ID
+        self.min_osnet_threshold = 0.40
+        self.similarity_threshold = 0.35  # MANAGED BY ADAPTER - fallback
+        self.exit_threshold = 0.40
+        self.exit_confidence_gap = 0.10
+
+        self._init_cameras()
         signal.signal(signal.SIGINT, self.signal_handler)
 
-        print("✅ System ready!\n")
-        print("=" * 70)
-        print("CONTROLS:")
-        print("  E - Force register at entry")
-        print("  D - Toggle debug output (extra verbose)")
-        print("  C - Clear all registrations")
-        print("  S - Show statistics")
-        print("  I - Show cross-camera adapter info")
-        print("  T - Show tracker diagnostics")
-        print(
-            "  F - Toggle face recognition (currently: {})".format(
-                "ON" if self.use_face_recognition else "OFF"
-            )
-        )
-        print(f"  Models loaded:")
-        print(f"    Pose:  yolo26n-pose.pt  ({'✅' if self.detector else '❌'})")
-        _face_status = (
-            "✅ CUSTOM"
-            if (self.face_detect_model and self._face_model_is_custom)
-            else ("⚠️  generic" if self.face_detect_model else "❌ none")
-        )
-        print(f"    Face:  yolo26n-face.pt   ({_face_status})")
-        print(
-            f"    Seg:   yolo26n-seg.pt    ({'✅' if self.seg_model else '⚠️  fallback'})"
-        )
-        print("  + - Increase room threshold (+0.05)")
-        print("  - - Decrease room threshold (-0.05)")
-        print("  ] - Increase exit threshold (+0.05)")
-        print("  [ - Decrease exit threshold (-0.05)")
-        print("  Q - Quit and export data")
-        if self.api_bridge:
-            print(f"\n🌐 Frontend API: http://localhost:{api_port}")
-            print(f"   WebSocket:     ws://localhost:{api_port}/ws/events")
-            print(
-                f"   Camera feeds:  http://localhost:{api_port}/stream/{{entry|room|exit}}"
-            )
-        print("=" * 70 + "\n")
-
     def _init_cameras(self):
-        """Initialize camera connections with normalized resolution."""
-        print("📹 Opening cameras...")
-
-        # Target resolution — keeps all three cameras consistent for detection
-        # and ensures overlay coordinates are correct.
-        # iBall native: 1280x720 → normalized to 640x480
-        # MacBook FaceTime HD: 1280x720 → normalized to 640x480
-        # Redmi via Iriun: variable → normalized to 640x480
         self.FRAME_WIDTH = 640
         self.FRAME_HEIGHT = 480
-
-        camera_info = [
-            ("Entry Camera", self.entry_idx),
-            ("Room  Camera", self.room_idx),
-            ("Exit  Camera", self.exit_idx),
-        ]
-
         self.cap_entry = cv2.VideoCapture(self.entry_idx)
         self.cap_room = cv2.VideoCapture(self.room_idx)
         self.cap_exit = cv2.VideoCapture(self.exit_idx)
-
-        caps = [self.cap_entry, self.cap_room, self.cap_exit]
-
-        all_ok = True
-        for (label, _), cap in zip(camera_info, caps):
-            if not cap.isOpened():
-                print(f"   ❌ {label} — FAILED TO OPEN")
-                all_ok = False
-                continue
-
-            # Request target resolution (camera will use nearest supported mode)
+        for cap in [self.cap_entry, self.cap_room, self.cap_exit]:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.FRAME_WIDTH)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.FRAME_HEIGHT)
 
-            actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            print(f"   ✅ {label}")
-            print(
-                f"      Requested: {self.FRAME_WIDTH}x{self.FRAME_HEIGHT} | "
-                f"Actual: {actual_w}x{actual_h}"
-            )
-
-        if all_ok:
-            print("✅ All cameras opened successfully\n")
-        else:
-            print("⚠️  One or more cameras failed — check connections\n")
-
     def signal_handler(self, sig, frame):
-        """Handle Ctrl+C gracefully."""
-        print("\n\n⚠️  Interrupt signal received...")
         self.running = False
 
-    # ── YOLO26-seg helper ─────────────────────────────────────────────────────
-
-    def _extract_masked_body_crop(
-        self, frame: np.ndarray, body_bbox: tuple
-    ) -> np.ndarray:
-        """
-        Use YOLO26-seg to get a pixel-level person mask inside body_bbox and
-        return a masked body crop where background pixels are zeroed out.
-
-        This eliminates background bleed that corrupts clothing colour histograms
-        — critical when people wear similar-coloured uniforms.
-
-        Falls back to the raw bbox crop when seg model is unavailable or when
-        no mask is found for this person.
-        """
+    def _extract_clothes_features(self, frame, body_bbox):
+        """Use custom YOLO26-clothes model to get precise clothing features."""
+        if self.clothes_model is None:
+            return {}
+        
         bx, by, bw, bh = body_bbox
         x1, y1 = max(0, bx), max(0, by)
         x2, y2 = min(frame.shape[1], bx + bw), min(frame.shape[0], by + bh)
+        crop = frame[y1:y2, x1:x2]
+        
+        if crop.size == 0: return {}
+        
+        results = self.clothes_model(crop, verbose=False)
+        features = []
+        for r in results:
+            for box in r.boxes:
+                features.append({
+                    "cls": int(box.cls[0]),
+                    "conf": float(box.conf[0]),
+                    "name": self.clothes_model.names[int(box.cls[0])]
+                })
+        return {"clothes": features}
 
-        raw_crop = frame[y1:y2, x1:x2].copy()
-
-        if self.seg_model is None or raw_crop.size == 0:
-            return raw_crop
-
-        try:
-            results = self.seg_model(
-                frame,
-                verbose=False,
-                conf=self._seg_conf_threshold,
-            )
-            if not results or results[0].masks is None:
-                return raw_crop
-
-            result = results[0]
-            boxes = result.boxes.xyxy.cpu().numpy()  # (N, 4)
-            masks = result.masks.data.cpu().numpy()  # (N, H, W) binary float
-
-            # Find mask whose box best overlaps our body_bbox
-            best_iou = 0.0
-            best_mask = None
-            for i, box in enumerate(boxes):
-                # Quick IoU between seg box and body_bbox
-                sx1, sy1, sx2, sy2 = box
-                ix1, iy1 = max(sx1, x1), max(sy1, y1)
-                ix2, iy2 = min(sx2, x2), min(sy2, y2)
-                if ix2 <= ix1 or iy2 <= iy1:
-                    continue
-                inter = (ix2 - ix1) * (iy2 - iy1)
-                area1 = (sx2 - sx1) * (sy2 - sy1)
-                area2 = bw * bh
-                iou = inter / (area1 + area2 - inter + 1e-6)
-                if iou > best_iou:
-                    best_iou = iou
-                    best_mask = masks[i]
-
-            if best_mask is None or best_iou < 0.25:
-                return raw_crop
-
-            # Resize mask to full frame size then crop to bbox
-            import cv2 as _cv2
-
-            mh, mw = frame.shape[:2]
-            mask_full = _cv2.resize(
-                best_mask, (mw, mh), interpolation=_cv2.INTER_NEAREST
-            )
-            mask_crop = mask_full[y1:y2, x1:x2]  # same region as raw_crop
-
-            # Apply mask — zero out background pixels
-            masked = raw_crop.copy()
-            masked[mask_crop < 0.5] = 0
-            return masked
-
-        except Exception as _e:
-            if self.debug_mode:
-                print(f"   ⚠️  Seg mask extraction failed: {_e}")
-            return raw_crop
-
-    # ── YOLO26-detect face helper ─────────────────────────────────────────────
-
-    def _detect_face_on_head_crop(
-        self, frame: np.ndarray, detection: dict
-    ) -> np.ndarray | None:
-        """
-        Run YOLO26-face (custom-trained) on a tight head-region crop derived
-        from pose keypoints (or top-25% of body bbox as fallback) to get a
-        high-quality face bounding box, then pass that crop to InsightFace
-        for embedding.
-
-        The custom face model outputs class 0 = "face", so we filter for
-        that class specifically.  If the generic COCO model is used as
-        fallback, we accept class 0 = "person" instead.
-
-        Returns the face image crop (BGR) or None if no face found.
-        """
-        if not self.use_face_recognition:
-            return None
-
+    def _detect_face_on_head_crop(self, frame, detection):
+        if not self.use_face_recognition: return None
         body_bbox = detection["body_bbox"]
         bx, by, bw, bh = body_bbox
         keypoints = detection.get("keypoints")
-
-        # ── Derive head-region crop ───────────────────────────────────────────
-        # Primary: use nose + eye + ear keypoints for a tight head bbox
         head_crop = None
-        _head_origin = (0, 0)  # track origin for debug
-
+        
+        # Primary: Use Pose Keypoints for head crop
         if keypoints is not None:
-            face_kpt_indices = [0, 1, 2, 3, 4]  # nose, l_eye, r_eye, l_ear, r_ear
-            face_pts = []
-            for idx in face_kpt_indices:
-                kx, ky, kconf = keypoints[idx]
-                if kconf > 0.25:
-                    face_pts.append((float(kx), float(ky)))
-
-            if len(face_pts) >= 2:
-                xs = [p[0] for p in face_pts]
-                ys = [p[1] for p in face_pts]
-                # Generous padding to give the face model enough context
-                pad_x = max(30, (max(xs) - min(xs)) * 0.8)
-                pad_y = max(30, (max(ys) - min(ys)) * 1.0)
-                hx1 = max(0, int(min(xs) - pad_x))
-                hy1 = max(0, int(min(ys) - pad_y))
-                hx2 = min(frame.shape[1], int(max(xs) + pad_x))
-                hy2 = min(frame.shape[0], int(max(ys) + pad_y * 1.5))
-                if hx2 > hx1 + 20 and hy2 > hy1 + 20:
-                    head_crop = frame[hy1:hy2, hx1:hx2]
-                    _head_origin = (hx1, hy1)
-
-        # Fallback: top 25% of person bbox (slightly larger than before)
-        if head_crop is None or head_crop.size == 0:
-            head_h = int(bh * 0.25)
-            hy1 = max(0, by)
-            hy2 = min(frame.shape[0], by + head_h)
-            hx1 = max(0, int(bx + bw * 0.05))
-            hx2 = min(frame.shape[1], int(bx + bw * 0.95))
-            if hx2 > hx1 + 10 and hy2 > hy1 + 10:
+            # 0=nose, 1=l_eye, 2=r_eye, 3=l_ear, 4=r_ear
+            pts = [keypoints[i] for i in range(5) if keypoints[i][2] > 0.2]
+            if len(pts) >= 2:
+                xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+                hx1, hy1 = max(0, int(min(xs) - 40)), max(0, int(min(ys) - 40))
+                hx2, hy2 = min(frame.shape[1], int(max(xs) + 40)), min(frame.shape[0], int(max(ys) + 60))
                 head_crop = frame[hy1:hy2, hx1:hx2]
-                _head_origin = (hx1, hy1)
-
+        
+        # Fallback: Top of body box
         if head_crop is None or head_crop.size == 0:
-            return None
+            head_crop = frame[max(0, by):min(frame.shape[0], by + int(bh * 0.25)), max(0, bx):min(frame.shape[1], bx + bw)]
+            
+        if head_crop is None or head_crop.size == 0: return None
+        
+        # Refine with YOLO26-face custom model
+        if self.face_detect_model:
+            res = self.face_detect_model(head_crop, verbose=False, conf=0.3)
+            if res and len(res[0].boxes) > 0:
+                fx1, fy1, fx2, fy2 = map(int, res[0].boxes.xyxy[0])
+                # Add some padding
+                pad = 10
+                fx1, fy1 = max(0, fx1-pad), max(0, fy1-pad)
+                fx2, fy2 = min(head_crop.shape[1], fx2+pad), min(head_crop.shape[0], fy2+pad)
+                return head_crop[fy1:fy2, fx1:fx2]
+        
+        return head_crop
 
-        # ── Upscale small head crops for better face detection ────────────────
-        # The custom face model was trained at 640px; tiny crops lose detail.
-        _min_dim = 80
-        hch, hcw = head_crop.shape[:2]
-        if hch < _min_dim or hcw < _min_dim:
-            _scale = max(_min_dim / hch, _min_dim / hcw)
-            _new_w = int(hcw * _scale)
-            _new_h = int(hch * _scale)
-            head_crop_scaled = cv2.resize(
-                head_crop, (_new_w, _new_h), interpolation=cv2.INTER_LINEAR
-            )
-        else:
-            head_crop_scaled = head_crop
-
-        # ── YOLO26-face on head crop (custom or generic) ─────────────────────
-        face_crop = None
-        _face_det_conf = 0.0
-
-        if self.face_detect_model is not None:
-            try:
-                # Use lower confidence for custom face model (it's trained for this)
-                # and higher for generic COCO model (more noise)
-                _conf_thresh = 0.30 if self._face_model_is_custom else 0.45
-                results = self.face_detect_model(
-                    head_crop_scaled, verbose=False, conf=_conf_thresh
-                )
-                if (
-                    results
-                    and results[0].boxes is not None
-                    and len(results[0].boxes) > 0
-                ):
-                    boxes = results[0].boxes.xyxy.cpu().numpy()
-                    confs = results[0].boxes.conf.cpu().numpy()
-                    classes = results[0].boxes.cls.cpu().numpy().astype(int)
-
-                    # Custom model: class 0 = "face"
-                    # Generic COCO: class 0 = "person"
-                    # In both cases we want class 0, but for the custom model
-                    # we can be confident it really is a face detection.
-                    _target_cls = 0
-                    valid_mask = classes == _target_cls
-                    if valid_mask.any():
-                        valid_boxes = boxes[valid_mask]
-                        valid_confs = confs[valid_mask]
-                        best_idx = int(valid_confs.argmax())
-                        _face_det_conf = float(valid_confs[best_idx])
-                        fx1, fy1, fx2, fy2 = map(int, valid_boxes[best_idx])
-
-                        # If we scaled the crop, map coordinates back
-                        if head_crop_scaled is not head_crop:
-                            _inv_scale = hcw / head_crop_scaled.shape[1]
-                            fx1 = int(fx1 * _inv_scale)
-                            fy1 = int(fy1 * _inv_scale)
-                            fx2 = int(fx2 * _inv_scale)
-                            fy2 = int(fy2 * _inv_scale)
-
-                        # Expand by 12% for chin + forehead (less aggressive
-                        # than before — the custom model gives tighter boxes)
-                        fw, fh = fx2 - fx1, fy2 - fy1
-                        _expand = 0.12 if self._face_model_is_custom else 0.15
-                        fx1 = max(0, fx1 - int(fw * _expand))
-                        fy1 = max(0, fy1 - int(fh * _expand))
-                        fx2 = min(head_crop.shape[1], fx2 + int(fw * _expand))
-                        fy2 = min(head_crop.shape[0], fy2 + int(fh * _expand * 1.3))
-                        if fx2 > fx1 + 5 and fy2 > fy1 + 5:
-                            face_crop = head_crop[fy1:fy2, fx1:fx2]
-
-                if self.debug_mode:
-                    _n_det = (
-                        len(results[0].boxes)
-                        if results and results[0].boxes is not None
-                        else 0
-                    )
-                    _model_tag = (
-                        "CUSTOM-FACE" if self._face_model_is_custom else "GENERIC"
-                    )
-                    if face_crop is not None:
-                        print(
-                            f"   🎯 [{_model_tag}] Face detected: conf={_face_det_conf:.2f}, "
-                            f"crop={face_crop.shape[1]}x{face_crop.shape[0]} "
-                            f"(from {_n_det} detection(s) in head crop)"
-                        )
-                    else:
-                        print(
-                            f"   ⚠️  [{_model_tag}] No face in head crop "
-                            f"({_n_det} raw detections, conf_thresh={_conf_thresh})"
-                        )
-
-            except Exception as _e:
-                if self.debug_mode:
-                    print(f"   ⚠️  YOLO26-face inference failed: {_e}")
-                face_crop = None
-
-        # Fallback: use the whole head crop if YOLO26-face didn't fire
-        if face_crop is None or face_crop.size == 0:
-            face_crop = head_crop
-
-        return face_crop if face_crop.size > 0 else None
-
-    # ── Core registration ─────────────────────────────────────────────────────
-
-    def register_person(
-        self, person_id: str, frame: np.ndarray, detection: dict
-    ) -> bool:
-        """
-        Register a new person with full feature extraction.
-
-        Extraction pipeline:
-          1. OSNet embedding from body bbox crop
-          2. Body analyser (hair / skin / clothing) using YOLO26-seg masked crop
-          3. Face embedding via YOLO26-face (custom) head crop → InsightFace ArcFace
-        """
+    def register_person(self, person_id, frame, detection):
         try:
             body_bbox = detection["body_bbox"]
-
-            if self.debug_mode:
-                print(f"   Extracting OSNet features...")
-
             osnet_features = self.osnet.extract_features(frame, body_bbox)
-            if osnet_features is None:
-                print(f"   ❌ OSNet extraction failed")
-                return False
-
-            # Update cross-camera adapter statistics (for entry camera)
-            self.cross_camera.update_feature_stats("entry", osnet_features)
-
-            if self.debug_mode:
-                print(f"   Extracting hair, skin, clothing (seg-masked crop)...")
-
-            # Use YOLO26-seg masked crop for more accurate colour features
-            masked_crop = self._extract_masked_body_crop(frame, body_bbox)
-            # body_analyzer.extract_features expects (full_frame, bbox) but we
-            # can pass the masked crop as if it's a full frame with bbox=(0,0,w,h)
-            mh, mw = masked_crop.shape[:2]
-            body_features = self.body_analyzer.extract_features(
-                masked_crop, (0, 0, mw, mh)
-            )
-
-            # ── Face embedding via YOLO26-detect + InsightFace ────────────────
+            if osnet_features is None: return False
+            
+            clothes_features = self._extract_clothes_features(frame, body_bbox)
+            
             face_embedding = None
-            if self.use_face_recognition and self.use_face_at_entry:
-                if self.debug_mode:
-                    _ftag = (
-                        "YOLO26-face (custom)"
-                        if self._face_model_is_custom
-                        else "YOLO26-detect (generic)"
-                    )
-                    print(f"   Detecting face with {_ftag} on head crop...")
-
+            if self.use_face_recognition:
                 face_crop = self._detect_face_on_head_crop(frame, detection)
                 if face_crop is not None:
-                    # Pass the face crop directly; bbox covers the whole crop
-                    face_embedding = self.face_recognizer.extract_face_embedding(
-                        face_crop,
-                        bbox=(0, 0, face_crop.shape[1], face_crop.shape[0]),
-                        min_confidence=0.3,
-                    )
-
-                if face_embedding is not None:
-                    _ftag = "custom" if self._face_model_is_custom else "generic"
-                    print(
-                        f"   ✅ Face detected and embedded via YOLO26-face [{_ftag}] (512D)"
-                    )
-                else:
-                    print(f"   ⚠️  No face detected (will use body-only matching)")
-
-            # Store profile
+                    face_embedding = self.face_recognizer.extract_face_embedding(face_crop, (0, 0, face_crop.shape[1], face_crop.shape[0]))
+            
             self.registered_people[person_id] = {
-                "osnet": osnet_features,
-                "body_features": body_features,
+                "osnet": osnet_features, 
+                "clothes": clothes_features,
                 "face_embedding": face_embedding,
-                "body_bbox": body_bbox,
-                "keypoints": detection.get("keypoints"),
+                "body_bbox": body_bbox, 
                 "registered_at": datetime.now(),
             }
-
             return True
-
         except Exception as e:
-            print(f"   ❌ Registration failed: {e}")
+            print(f"❌ Reg error: {e}")
             return False
 
-    def match_person(
-        self, frame: np.ndarray, detection: dict, target_camera: str = "room"
-    ) -> tuple:
-        """
-        Match a detected person against registered people.
-
-        Face matching is now used at ALL cameras (entry, room, exit) — not
-        just at exit.  This is essential for uniform scenarios (CISF, etc.)
-        where body/clothing appearance is identical across people.
-
-        Matching priority:
-          1. Face embedding (InsightFace ArcFace) — highest discriminability,
-             obtained via YOLO26-detect on a zoomed head crop.
-          2. OSNet appearance embedding — robust body-level feature.
-          3. Clothing / hair colour histogram from YOLO26-seg masked crop.
-
-        Args:
-            frame: Current frame
-            detection: Detection dictionary with body_bbox (and optionally keypoints)
-            target_camera: Camera ID ('room', 'exit')
-
-        Returns: (person_id, similarity, debug_info)
-        """
-        if not self.registered_people:
-            return None, 0.0, {}
-
+    def match_person(self, frame, detection, target_camera="room"):
+        if not self.registered_people: return None, 0.0, {}
         body_bbox = detection["body_bbox"]
-
-        try:
-            # ── Face embedding — used at ALL cameras now ──────────────────────
-            # Previously restricted to exit only, which caused room mismatches
-            # for people in uniforms.  The YOLO26-detect head-crop approach gives
-            # reliable embeddings even at room-camera distances.
-            face_query = None
-            if self.use_face_recognition and (
-                (target_camera == "exit" and self.use_face_at_exit)
-                or (target_camera == "room")
-                or (target_camera == "entry" and self.use_face_at_entry)
-            ):
-                face_crop = self._detect_face_on_head_crop(frame, detection)
-                if face_crop is not None:
-                    face_query = self.face_recognizer.extract_face_embedding(
-                        face_crop,
-                        bbox=(0, 0, face_crop.shape[1], face_crop.shape[0]),
-                        min_confidence=0.3,
-                    )
-
-                if self.debug_mode and face_query is not None:
-                    print(
-                        f"   🔍 Face detected at {target_camera} — face-first matching active"
-                    )
-                elif self.debug_mode:
-                    print(
-                        f"   ⚠️  No face detected at {target_camera} — body-only fallback"
-                    )
-
-            # Extract query features
-            osnet_query = self.osnet.extract_features(frame, body_bbox)
-            if osnet_query is None:
-                return None, 0.0, {}
-
-            # Update cross-camera adapter statistics
-            self.cross_camera.update_feature_stats(target_camera, osnet_query)
-
-            body_query = self.body_analyzer.extract_features(frame, body_bbox)
-
-        except Exception as e:
-            if self.debug_mode:
-                print(f"⚠️ Feature extraction failed: {e}")
-            return None, 0.0, {}
-
-        # Compare with all registered people
-        best_id = None
-        best_score = 0.0
-        second_best_score = 0.0
+        
+        osnet_query = self.osnet.extract_features(frame, body_bbox)
+        if osnet_query is None: return None, 0.0, {}
+        
+        clothes_query = self._extract_clothes_features(frame, body_bbox)
+        
+        face_query = None
+        if self.use_face_recognition:
+            face_crop = self._detect_face_on_head_crop(frame, detection)
+            if face_crop is not None:
+                face_query = self.face_recognizer.extract_face_embedding(face_crop, (0, 0, face_crop.shape[1], face_crop.shape[0]))
+        
+        best_id, best_score, second_best_score = None, 0.0, 0.0
         all_scores = {}
-
-        # Initialize debug_info dictionary
-        debug_info = {
-            "all_scores": {},
-            "adaptive_threshold": 0.0,
-            "adaptive_gap": 0.0,
-            "reason": "",
-            "gap": 0.0,
-            "second_best": 0.0,
-            "face_available": face_query is not None,
-        }
-
-        # Get adaptive threshold from cross-camera adapter
-        adaptive_threshold, adaptive_gap = self.cross_camera.get_matching_params(
-            "entry", target_camera
-        )
-        debug_info["adaptive_threshold"] = adaptive_threshold
-        debug_info["adaptive_gap"] = adaptive_gap
-
-        for person_id, person_data in self.registered_people.items():
-            osnet_registered = person_data["osnet"]
-            body_registered = person_data["body_features"]
-            face_registered = person_data.get("face_embedding")
-
-            # ── Face similarity — now used at ALL cameras ─────────────────
+        
+        for pid, pdata in self.registered_people.items():
+            # 1. OSNet Score
+            osnet_sim = float(np.dot(osnet_query, pdata["osnet"]) / (np.linalg.norm(osnet_query) * np.linalg.norm(pdata["osnet"]) + 1e-6))
+            
+            # 2. Face Score
             face_sim = 0.0
-            has_face_match = False
-            if face_query is not None and face_registered is not None:
-                face_sim = self.face_recognizer.compare_faces(
-                    face_query, face_registered
-                )
-                has_face_match = True
+            if face_query is not None and pdata["face_embedding"] is not None:
+                face_sim = self.face_recognizer.compare_faces(face_query, pdata["face_embedding"])
+            
+            # 3. Clothes Score (Intersection over Union of class IDs)
+            clothes_sim = 0.0
+            q_cl = set([c['cls'] for c in clothes_query.get('clothes', [])])
+            r_cl = set([c['cls'] for c in pdata.get('clothes', {}).get('clothes', [])])
+            if q_cl and r_cl:
+                clothes_sim = len(q_cl & r_cl) / len(q_cl | r_cl)
 
-                if self.debug_mode:
-                    print(
-                        f"\n👤 Face Match [{target_camera}] for {person_id}: {face_sim:.3f}"
-                    )
-                    if face_sim >= self.face_threshold:
-                        print(f"   ✅ Face match! (>{self.face_threshold:.2f})")
-                    else:
-                        print(f"   ❌ Face no match (<{self.face_threshold:.2f})")
-
-            # OSNet similarity (PROPER cosine similarity - normalized dot product)
-            dot_product = np.dot(osnet_query, osnet_registered)
-            norm_query = np.linalg.norm(osnet_query)
-            norm_registered = np.linalg.norm(osnet_registered)
-
-            # DEBUG: Print raw values to diagnose
-            if self.debug_mode:
-                print(f"\n🔬 OSNet Debug for {person_id}:")
-                print(f"   Dot product: {dot_product:.6f}")
-                print(f"   Query norm: {norm_query:.6f}")
-                print(f"   Registered norm: {norm_registered:.6f}")
-
-            osnet_sim = float(dot_product / (norm_query * norm_registered + 1e-6))
-
-            # Hair similarity
-            hair_sim = self._compare_hair(
-                body_query.get("hair_color", {}), body_registered.get("hair_color", {})
-            )
-
-            # Skin similarity
-            skin_sim = self._compare_skin(
-                body_query.get("skin_tone", {}), body_registered.get("skin_tone", {})
-            )
-
-            # Clothing similarity
-            upper_sim = self._compare_clothing(
-                body_query.get("upper_clothing", {}),
-                body_registered.get("upper_clothing", {}),
-            )
-            lower_sim = self._compare_clothing(
-                body_query.get("lower_clothing", {}),
-                body_registered.get("lower_clothing", {}),
-            )
-            clothing_sim = (upper_sim + lower_sim) / 2.0
-
-            # ── Weighted combination with face (ALL cameras) ─────────────
-            if has_face_match and face_sim >= self.face_threshold:
-                # Face match confirmed — face-dominant scoring.
-                # face_weight=0.70, remaining 0.30 goes to OSNet.
-                # The custom yolo26n-face.pt model gives much cleaner face
-                # crops, so face similarity is now highly trustworthy.
-                total_score = face_sim * self.face_weight + osnet_sim * (
-                    1.0 - self.face_weight
-                )
-
-                if self.debug_mode:
-                    print(
-                        f"   Using FACE-DOMINANT scoring [{target_camera}]: "
-                        f"{total_score:.3f} (face={face_sim:.3f}×{self.face_weight:.2f} "
-                        f"+ osnet={osnet_sim:.3f}×{1.0 - self.face_weight:.2f})"
-                    )
-            elif has_face_match and face_sim < self.face_threshold and face_sim > 0.15:
-                # Face was detected but did NOT match — this is a strong
-                # NEGATIVE signal.  If we can see a face and it doesn't match,
-                # the person is likely different.  Penalise the body-only
-                # score to prevent false positives from clothing similarity.
-                if osnet_sim < self.min_osnet_threshold:
-                    debug_info["all_scores"][person_id] = {
-                        "osnet": osnet_sim,
-                        "hair": hair_sim,
-                        "skin": skin_sim,
-                        "clothing": clothing_sim,
-                        "face": face_sim,
-                        "total": 0.0,
-                        "rejected": f"Face mismatch ({face_sim:.3f}) + low OSNet ({osnet_sim:.3f})",
-                    }
-                    continue  # Skip this person entirely
-
-                # Apply penalty: reduce body score when face says "not the same person"
-                _face_penalty = 0.85  # 15% penalty
-                total_score = (
-                    osnet_sim * self.osnet_weight
-                    + hair_sim * self.hair_weight
-                    + skin_sim * self.skin_weight
-                    + clothing_sim * self.clothing_weight
-                ) * _face_penalty
-
-                if self.debug_mode:
-                    print(
-                        f"   ⚠️  Face MISMATCH penalty [{target_camera}]: "
-                        f"face={face_sim:.3f} < {self.face_threshold:.2f} → "
-                        f"body score penalised to {total_score:.3f}"
-                    )
+            # Combined Score
+            if face_sim > self.face_threshold:
+                # If face matches, trust it!
+                score = face_sim * 0.8 + osnet_sim * 0.2
             else:
-                # No face or face didn't match - use body-only scoring
-                # HARD OSNET CHECK: Reject if OSNet similarity is too low
-                if osnet_sim < self.min_osnet_threshold:
-                    debug_info["all_scores"][person_id] = {
-                        "osnet": osnet_sim,
-                        "hair": hair_sim,
-                        "skin": skin_sim,
-                        "clothing": clothing_sim,
-                        "face": face_sim if has_face_match else None,
-                        "total": 0.0,
-                        "rejected": f"OSNet too low ({osnet_sim:.3f} < {self.min_osnet_threshold:.3f})",
-                    }
-                    continue  # Skip this person entirely
+                # Fallback to body + clothes
+                score = osnet_sim * 0.7 + clothes_sim * 0.3
+            
+            # Adapter adjustment
+            score = self.cross_camera.adjust_similarity_score(score, "entry", target_camera, osnet_query, pdata["osnet"])
+            
+            all_scores[pid] = {"total": score, "face": face_sim, "osnet": osnet_sim, "clothes": clothes_sim}
+            if score > best_score: second_best_score, best_score, best_id = best_score, score, pid
+            elif score > second_best_score: second_best_score = score
 
-                total_score = (
-                    osnet_sim * self.osnet_weight
-                    + hair_sim * self.hair_weight
-                    + skin_sim * self.skin_weight
-                    + clothing_sim * self.clothing_weight
-                )
+        # Using adapter for final decision
+        should_match, reason = self.cross_camera.should_match(best_score, second_best_score, len(self.registered_people), "entry", target_camera)
+        
+        if not should_match and best_score < 0.3: # Hard minimum
+            return None, best_score, {"all_scores": all_scores, "reason": "score_too_low"}
+            
+        return best_id, best_score, {"all_scores": all_scores, "face_confirmed": face_sim >= self.face_threshold}
 
-            # Apply cross-camera adjustment
-            total_score = self.cross_camera.adjust_similarity_score(
-                total_score,
-                source_camera="entry",
-                target_camera=target_camera,
-                features_query=osnet_query,
-                features_registered=osnet_registered,
-            )
+    def _calculate_velocity(self, person_id):
+        traj = self.trajectories.get(person_id, [])
+        if len(traj) < 2: return 0.0
+        (x1, y1, t1), (x2, y2, t2) = traj[-2], traj[-1]
+        dt = (t2 - t1).total_seconds()
+        if dt < 0.001: return 0.0
+        return np.sqrt((x2 - x1)**2 + (y2 - y1)**2) / (self.pixels_per_meter * dt)
 
-            all_scores[person_id] = {
-                "osnet": osnet_sim,
-                "hair": hair_sim,
-                "skin": skin_sim,
-                "clothing": clothing_sim,
-                "face": face_sim if has_face_match else None,  # Phase 5
-                "total": total_score,
-            }
+    def _bbox_overlap(self, b1, b2):
+        x1, y1, w1, h1 = b1
+        x2, y2, w2, h2 = b2
+        xi1, yi1, xi2, yi2 = max(x1, x2), max(y1, y2), min(x1 + w1, x2 + w2), min(y1 + h1, y2 + h2)
+        if xi2 <= xi1 or yi2 <= yi1: return 0.0
+        inter = (xi2 - xi1) * (yi2 - yi1)
+        return inter / (w1 * h1 + w2 * h2 - inter)
 
-            if total_score > best_score:
-                second_best_score = best_score  # Track second best
-                best_score = total_score
-                best_id = person_id
-            elif total_score > second_best_score:
-                second_best_score = total_score
+    def _draw_skeletons(self, frame, keypoints):
+        """Draw 17-point pose skeleton."""
+        if keypoints is None: return
+        skeleton = [
+            (0,1), (0,2), (1,3), (2,4), (5,6), (5,7), (7,9), (6,8), (8,10),
+            (5,11), (6,12), (11,12), (11,13), (13,15), (12,14), (14,16)
+        ]
+        for s1, s2 in skeleton:
+            x1, y1, c1 = keypoints[s1]
+            x2, y2, c2 = keypoints[s2]
+            if c1 > 0.3 and c2 > 0.3:
+                cv2.line(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 255), 2)
+        for x, y, c in keypoints:
+            if c > 0.3:
+                cv2.circle(frame, (int(x), int(y)), 4, (0, 255, 0), -1)
 
-        # Use CrossCameraAdapter to decide if match should be accepted
-        should_match, reason = self.cross_camera.should_match(
-            best_score=best_score,
-            second_best_score=second_best_score,
-            num_registered=len(self.registered_people),
-            source_camera="entry",
-            target_camera=target_camera,
-        )
-
-        _common_debug = {
-            "all_scores": all_scores,
-            "gap": best_score - second_best_score,
-            "second_best": second_best_score,
-            "adaptive_threshold": adaptive_threshold,
-            "adaptive_gap": adaptive_gap,
-            "face_available": face_query is not None,
-        }
-
-        if not should_match:
-            return (
-                None,
-                best_score,
-                {**_common_debug, "reason": reason},
-            )
-
-        return (
-            best_id,
-            best_score,
-            {
-                **_common_debug,
-                "reason": "clear_match",
-                "face_confirmed": (
-                    face_query is not None
-                    and all_scores.get(best_id, {}).get("face", 0.0)
-                    >= self.face_threshold
-                ),
-            },
-        )
-
-    def _compare_hair(self, hair1: dict, hair2: dict) -> float:
-        """Compare hair colors."""
-        if not hair1 or not hair2:
-            return 0.5
-
-        color1 = hair1.get("dominant_color")
-        color2 = hair2.get("dominant_color")
-
-        if not color1 or not color2:
-            return 0.5
-
-        return 1.0 if color1 == color2 else 0.3
-
-    def _compare_skin(self, skin1: dict, skin2: dict) -> float:
-        """Compare skin tones."""
-        if not skin1 or not skin2:
-            return 0.5
-
-        if skin1.get("hsv_mean") is None or skin2.get("hsv_mean") is None:
-            return 0.5
-
-        hsv1 = np.array(skin1["hsv_mean"])
-        hsv2 = np.array(skin2["hsv_mean"])
-
-        h_dist = min(abs(hsv1[0] - hsv2[0]), 180 - abs(hsv1[0] - hsv2[0]))
-        s_dist = abs(hsv1[1] - hsv2[1])
-        v_dist = abs(hsv1[2] - hsv2[2])
-
-        total_dist = (h_dist / 180) * 0.3 + (s_dist / 255) * 0.3 + (v_dist / 255) * 0.4
-        return 1.0 - total_dist
-
-    def _compare_clothing(self, cloth1: dict, cloth2: dict) -> float:
-        """Compare clothing colors."""
-        if not cloth1 or not cloth2:
-            return 0.5
-
-        colors1 = cloth1.get("dominant_colors", [])
-        colors2 = cloth2.get("dominant_colors", [])
-
-        if not colors1 or not colors2:
-            return 0.5
-
-        colors1_set = set(colors1)
-        colors2_set = set(colors2)
-        common = len(colors1_set.intersection(colors2_set))
-        total = len(colors1_set.union(colors2_set))
-
-        return common / total if total > 0 else 0.0
-
-    def _calculate_velocity(self, person_id: str) -> float:
-        """Calculate velocity from trajectory."""
-        trajectory = self.trajectories.get(person_id, [])
-
-        if len(trajectory) < 2:
-            return 0.0
-
-        # Use last two points
-        (x1, y1, t1) = trajectory[-2]
-        (x2, y2, t2) = trajectory[-1]
-
-        time_delta = (t2 - t1).total_seconds()
-        if time_delta < 0.001:
-            return 0.0
-
-        # Calculate pixel distance
-        distance_pixels = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-
-        # Convert to meters
-        distance_meters = distance_pixels / self.pixels_per_meter
-
-        # Velocity in m/s
-        velocity = distance_meters / time_delta
-
-        return velocity
-
-    def _get_detection_key(self, bbox):
-        """Create a key for tracking detections across frames (area-based)."""
-        bx, by, bw, bh = bbox
-        # Use center and rough size for tracking
-        center_x = bx + bw // 2
-        center_y = by + bh // 2
-        size = (bw * bh) // 100  # Rough size bucket
-        return f"{center_x // 50}_{center_y // 50}_{size}"
-
-    def _smooth_match(self, detection_key, person_id, similarity):
-        """Apply temporal smoothing - require multiple frames to confirm match."""
-        # Add to history
-        history = self.detection_history[detection_key]
-        history.append((person_id, similarity))
-
-        # Keep only last N frames
-        if len(history) > self.temporal_window:
-            history.pop(0)
-
-        # If we have enough frames, do majority vote
-        if len(history) >= self.temporal_window:
-            # Count votes for each person_id
-            votes = defaultdict(int)
-            for pid, sim in history:
-                votes[pid] += 1
-
-            # Find majority
-            if votes:
-                majority_id = max(votes, key=lambda k: votes[k])
-                majority_count = votes[majority_id]
-
-                # Need at least 2 out of 3 frames
-                if majority_count >= 2:
-                    self.stable_ids[detection_key] = majority_id
-                    return majority_id, True  # Confirmed
-
-        # Not enough frames or no majority - return last stable ID if exists
-        if detection_key in self.stable_ids:
-            return self.stable_ids[detection_key], True
-
-        # Return current match but marked as unconfirmed
-        return person_id, False
-
-    def _bbox_overlap(self, bbox1, bbox2):
-        """Calculate IoU (Intersection over Union) between two bboxes."""
-        x1, y1, w1, h1 = bbox1
-        x2, y2, w2, h2 = bbox2
-
-        # Calculate intersection
-        xi1 = max(x1, x2)
-        yi1 = max(y1, y2)
-        xi2 = min(x1 + w1, x2 + w2)
-        yi2 = min(y1 + h1, y2 + h2)
-
-        if xi2 <= xi1 or yi2 <= yi1:
-            return 0.0
-
-        intersection = (xi2 - xi1) * (yi2 - yi1)
-        union = w1 * h1 + w2 * h2 - intersection
-
-        return intersection / union if union > 0 else 0.0
-
-    def process_entry_camera(self, frame: np.ndarray) -> np.ndarray:
-        """Process entry camera - auto-register new people."""
+    def process_entry_camera(self, frame):
         display = frame.copy()
-        current_time = time.time()
-
-        # Detect people
+        current_time = datetime.now()
         detections = self.detector.detect(frame)
         self.stats["entry_detections"] += len(detections)
-
-        for detection in detections:
-            body_bbox = detection["body_bbox"]
-            bx, by, bw, bh = body_bbox
-
-            # Draw pose keypoints and skeleton if available
-            if detection.get("keypoints") is not None:
-                keypoints = detection["keypoints"]
-
-                # Draw skeleton connections first
-                skeleton = [
-                    (0, 1),
-                    (0, 2),
-                    (1, 3),
-                    (2, 4),  # Head
-                    (5, 6),
-                    (5, 7),
-                    (7, 9),
-                    (6, 8),
-                    (8, 10),  # Arms
-                    (5, 11),
-                    (6, 12),
-                    (11, 12),  # Torso
-                    (11, 13),
-                    (13, 15),
-                    (12, 14),
-                    (14, 16),  # Legs
-                ]
-
-                for start_idx, end_idx in skeleton:
-                    if start_idx < len(keypoints) and end_idx < len(keypoints):
-                        x1, y1, conf1 = keypoints[start_idx]
-                        x2, y2, conf2 = keypoints[end_idx]
-                        if conf1 > 0.3 and conf2 > 0.3:
-                            cv2.line(
-                                display,
-                                (int(x1), int(y1)),
-                                (int(x2), int(y2)),
-                                (0, 255, 255),
-                                2,
-                            )
-
-                # Draw keypoints on top
-                for i, (x, y, conf) in enumerate(keypoints):
-                    if conf > 0.3:
-                        color = (0, 255, 0) if conf > 0.7 else (0, 200, 200)
-                        cv2.circle(display, (int(x), int(y)), 5, color, -1)
-                        cv2.circle(display, (int(x), int(y)), 6, (255, 255, 255), 1)
-
-            # Draw detection
+        for d in detections:
+            bbox = d["body_bbox"]
+            bx, by, bw, bh = bbox
+            self._draw_skeletons(display, d.get("keypoints"))
             cv2.rectangle(display, (bx, by), (bx + bw, by + bh), (0, 255, 255), 2)
-
-            # Check if this is same person as last registered (area-based cooldown)
-            skip_registration = False
-            if self.last_entry_person_bbox is not None:
-                overlap = self._bbox_overlap(body_bbox, self.last_entry_person_bbox)
-                time_since_last = current_time - self.entry_cooldown.get(
-                    "last_registration", 0
-                )
-
-                if (
-                    overlap > self.entry_area_threshold
-                    and time_since_last < self.entry_cooldown_seconds
-                ):
-                    skip_registration = True
-                    cv2.putText(
-                        display,
-                        "REGISTERED",
-                        (bx, by - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (0, 255, 0),
-                        2,
-                    )
-
-            # Auto-register if enabled and not in cooldown
-            if self.auto_register and not skip_registration:
+            
+            skip = False
+            p_id, _, _ = self.match_person(frame, d, "entry")
+            if p_id and p_id in self.active_sessions:
+                skip = True
+                cv2.putText(display, f"ALREADY INSIDE ({p_id})", (bx, by - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            
+            if not skip and self.last_entry_person_bbox:
+                overlap = self._bbox_overlap(bbox, self.last_entry_person_bbox)
+                last_reg = self.entry_cooldown.get("last_registration", current_time - timedelta(seconds=100))
+                if overlap > self.entry_area_threshold and (current_time - last_reg).total_seconds() < self.entry_cooldown_seconds:
+                    skip = True
+                    cv2.putText(display, "REGISTERED", (bx, by - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            
+            if self.auto_register and not skip:
                 self.person_counter += 1
-                person_id = f"P{self.person_counter:03d}"
-
-                print(f"\n⏳ Auto-registering {person_id} at entry...")
-                success = self.register_person(person_id, frame, detection)
-
-                if success:
+                pid = f"P{self.person_counter:03d}"
+                if self.register_person(pid, frame, d):
                     self.entry_cooldown["last_registration"] = current_time
-                    self.last_entry_person_bbox = body_bbox
+                    self.last_entry_person_bbox = bbox
                     self.stats["registered"] += 1
-
-                    # Create session
-                    session_id = f"SESSION_{person_id}_{int(current_time)}"
-                    self.active_sessions[person_id] = {
-                        "session_id": session_id,
-                        "entry_time": datetime.now(),
-                    }
-                    self.person_status[person_id] = "active"
                     self.stats["inside"] += 1
-
-                    # ── Phase 7: Tailgating detection ─────────────────────────
-                    if self.tailgating is not None:
-                        tg_event = self.tailgating.record_entry(
-                            person_id=person_id,
-                            bbox=body_bbox,
-                            is_authorized=True,
-                        )
-                        if tg_event is not None:
-                            self.alert_manager.alert_tailgating(
-                                person_count=tg_event.person_count,
-                                person_ids=tg_event.person_ids,
-                                camera_source="entry_camera",
-                                time_window=self.tailgating.time_window,
-                            )
-                            # Draw tailgating warning banner
-                            _tw_h, _tw_w = display.shape[:2]
-                            cv2.rectangle(
-                                display,
-                                (0, by + bh + 5),
-                                (_tw_w, by + bh + 35),
-                                (0, 50, 200),
-                                -1,
-                            )
-                            cv2.putText(
-                                display,
-                                f"⚠ TAILGATING: {tg_event.person_count} entries",
-                                (10, by + bh + 28),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.55,
-                                (255, 255, 255),
-                                2,
-                            )
-
-                    # ── Phase 7: Push entry event to WebSocket ────────────────
-                    if self.api_bridge is not None:
-                        self.api_bridge.push_event(
-                            "entry",
-                            {
-                                "person_id": person_id,
-                                "session_id": session_id,
-                                "timestamp": datetime.now().isoformat(),
-                            },
-                        )
-
-                    # Pull extracted features from in-memory registry
-                    registered_profile = self.registered_people[person_id]
-                    face_embedding = registered_profile.get("face_embedding")
-                    body_features = registered_profile.get("body_features")
-
-                    # Add person to database FIRST (with face embedding),
-                    # then record entry so the DB row already exists.
-                    self.database.add_person(
-                        person_id,
-                        body_features=body_features,
-                        face_embedding=face_embedding,
-                    )
-                    self.database.record_entry(person_id)
-
-                    print(f"✅ Registered {person_id} at entry gate")
-
-                    # Show extracted features
-                    features = body_features or {}
-
-                    hair = features.get("hair_color", {})
-                    if hair.get("dominant_color"):
-                        print(
-                            f"   👤 Hair: {hair['dominant_color']} (conf: {hair.get('confidence', 0):.2f})"
-                        )
-
-                    skin = features.get("skin_tone", {})
-                    if skin.get("hsv_mean"):
-                        print(
-                            f"   🎨 Skin: {skin.get('percentage', 0) * 100:.1f}% detected"
-                        )
-
-                    upper = features.get("upper_clothing", {})
-                    if upper.get("dominant_colors"):
-                        print(f"   👕 Upper: {upper['dominant_colors'][:2]}")
-
-                    lower = features.get("lower_clothing", {})
-                    if lower.get("dominant_colors"):
-                        print(f"   👖 Lower: {lower['dominant_colors'][:2]}")
-
-                    print()
-
-                    # Show BIG notification with ID
-                    cv2.rectangle(
-                        display, (bx, by - 80), (bx + 200, by - 5), (0, 255, 0), -1
-                    )
-                    cv2.putText(
-                        display,
-                        f"REGISTERED: {person_id}",
-                        (bx + 5, by - 50),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 0, 0),
-                        2,
-                    )
-
-                    # Show feature indicators
-                    hair_color = features.get("hair_color", {}).get(
-                        "dominant_color", "?"
-                    )
-                    upper_colors = features.get("upper_clothing", {}).get(
-                        "dominant_colors", ["?"]
-                    )
-                    cv2.putText(
-                        display,
-                        f"Hair:{hair_color} Top:{upper_colors[0] if upper_colors else '?'}",
-                        (bx + 5, by - 20),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (0, 0, 0),
-                        1,
-                    )
-
-        # Status overlay — use actual frame width so it covers every camera resolution
-        h_disp, w_disp = display.shape[:2]
-        cv2.rectangle(display, (0, 0), (w_disp, 80), (0, 0, 0), -1)
-        cv2.putText(
-            display,
-            "ENTRY CAMERA",
-            (10, 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 255),
-            2,
-        )
-        cv2.putText(
-            display,
-            f"Registered: {self.stats['registered']} | Inside: {self.stats['inside']}",
-            (10, 50),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 0) if self.stats["registered"] > 0 else (255, 255, 255),
-            2,
-        )
-        cv2.putText(
-            display,
-            f"Detections: {len(detections)} | Face-ID: {'ON' if self.use_face_recognition else 'OFF'}",
-            (10, 70),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.4,
-            (0, 255, 255) if self.use_face_recognition else (200, 200, 200),
-            1,
-        )
-
-        # ── Phase 7: Tailgating indicator overlay ────────────────────────────
-        if self.tailgating is not None:
-            diag = self.tailgating.diagnostics()
-            entries_in_window = diag["entries_in_window"]
-            if entries_in_window >= 2:
-                cv2.putText(
-                    display,
-                    f"⚠ {entries_in_window} entries in {diag['window_seconds']:.0f}s window",
-                    (10, h_disp - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (0, 100, 255),
-                    1,
-                )
-
-        # ── Phase 7: Push annotated frame to API bridge (MJPEG stream) ───────
-        if self.api_bridge is not None:
-            self.api_bridge.push_frame("entry", display)
-
+                    self.active_sessions[pid] = {"entry_time": current_time}
+                    if self.api_bridge: self.api_bridge.push_event("entry", {"person_id": pid, "timestamp": current_time.isoformat()})
+                    self.database.add_person(pid)
+                    self.database.record_entry(pid)
+        if self.api_bridge: self.api_bridge.push_frame("entry", display)
         return display
 
-    def process_room_camera(self, frame: np.ndarray) -> np.ndarray:
-        """Process room camera — track all people with ByteTrack, check behaviors."""
-        # Apply cross-camera preprocessing FIRST
-        frame_preprocessed = self.cross_camera.preprocess_frame(frame, camera_id="room")
-
-        display = frame_preprocessed.copy()
+    def process_room_camera(self, frame):
+        frame_p = self.cross_camera.preprocess_frame(frame, "room")
+        display = frame_p.copy()
         current_time = datetime.now()
-
-        # ── Phase 6: use tracker if available, else fall back to detect() ──────
-        if self.multi_tracker is not None:
-            raw_detections = self.multi_tracker.update(frame_preprocessed)
-            # Wrap TrackedPerson objects into the legacy detection-dict format
-            # so all downstream code works unchanged.
-            detections = []
-            track_ids = []
-            for tp in raw_detections:
-                d = tp.to_detection_dict()
-                detections.append(d)
-                track_ids.append(tp.track_id)
+        
+        if self.multi_tracker:
+            raw = self.multi_tracker.update(frame_p)
+            detections = [tp.to_detection_dict() for tp in raw]
+            track_ids = [tp.track_id for tp in raw]
         else:
-            detections = self.detector.detect(frame_preprocessed)
+            detections = self.detector.detect(frame_p)
             track_ids = [None] * len(detections)
-
+        
         self.stats["room_detections"] += len(detections)
-        self.stats["total_detections"] += len(detections)
-
-        # Purge stale track cache entries (prevents stale body-only matches
-        # from being resurrected when a lost track_id is re-assigned)
         self._release_lost_tracks()
+        auth_cnt, unauth_cnt = 0, 0
 
-        authorized_count = 0
-        unauthorized_count = 0
+        # Weapon detection
+        weapon_detected = False
+        if self.threat_model:
+            res = self.threat_model(frame, verbose=False)
+            for r in res:
+                for b in r.boxes:
+                    if b.conf[0] > 0.45:
+                        weapon_detected = True
+                        lbl = self.threat_model.names[int(b.cls[0])]
+                        wx1, wy1, wx2, wy2 = map(int, b.xyxy[0])
+                        cv2.rectangle(display, (wx1, wy1), (wx2, wy2), (0, 0, 255), 3)
+                        cv2.putText(display, f"WEAPON: {lbl.upper()}", (wx1, wy1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+                        self.alert_manager.alert_weapon(lbl, float(b.conf[0]))
 
-        # Collect per-frame velocities for panic detection
-        frame_velocities = []
-
-        for detection, track_id in zip(detections, track_ids):
-            body_bbox = detection["body_bbox"]
-            bx, by, bw, bh = body_bbox
-            center_x = bx + bw // 2
-            center_y = by + bh // 2
-
-            # ── Phase 6: check track cache before running expensive match ──────
-            person_id = None
-            similarity = 0.0
-            debug_info = {}
-
-            cached = (
-                self._track_match_cache.get(track_id) if track_id is not None else None
-            )
-            cache_valid = (
-                cached is not None and (time.time() - cached[2]) < self._track_cache_ttl
-            )
-
-            if cache_valid:
-                person_id, similarity = cached[0], cached[1]
-                debug_info = {"from_cache": True}
-                # If this track was face-confirmed, skip re-evaluation entirely
-                if track_id in self._face_confirmed_tracks:
-                    debug_info["face_pinned"] = True
+        for d, tid in zip(detections, track_ids):
+            bbox = d["body_bbox"]
+            bx, by, bw, bh = bbox
+            cx, cy = bx + bw//2, by + bh//2
+            self._draw_skeletons(display, d.get("keypoints"))
+            
+            pid, sim, debug = None, 0.0, {}
+            cached = self._track_match_cache.get(tid) if tid else None
+            if cached and (time.time() - cached[2]) < self._track_cache_ttl:
+                pid, sim = cached[0], cached[1]
             else:
-                # Full re-ID match (includes face at room camera now)
-                person_id, similarity, debug_info = self.match_person(
-                    frame_preprocessed, detection, target_camera="room"
-                )
-                # Update tracker association and cache
-                if track_id is not None:
-                    if person_id and self.multi_tracker is not None:
-                        self.multi_tracker.associate(track_id, person_id)
-                    self._track_match_cache[track_id] = (
-                        person_id,
-                        similarity,
-                        time.time(),
-                    )
-                    # Pin tracks that were confirmed by face — they won't flicker
-                    if debug_info.get("face_confirmed"):
-                        self._face_confirmed_tracks.add(track_id)
-                        print(f"   📌 Track T{track_id} face-pinned as {person_id}")
-
-            # ALWAYS print room detection status (even if not debug mode)
-            print(
-                f"\n🔍 ROOM: Person detected at ({bx}, {by}), size: {bw}x{bh}"
-                + (f" [track={track_id}]" if track_id is not None else "")
-            )
-
-            confirmed = True  # Always confirmed - no verification delay
-
-            # Get adaptive threshold for display
-            adaptive_threshold = debug_info.get(
-                "adaptive_threshold", self.similarity_threshold
-            )
-
-            # Quick status print
-            if person_id and person_id in self.active_sessions:
-                print(f"   ✅ AUTHORIZED: {person_id} (score: {similarity:.3f})")
-            elif person_id:
-                print(f"   ⚠️  REGISTERED but NO SESSION: {person_id}")
+                pid, sim, debug = self.match_person(frame_p, d, "room")
+                if tid: self._track_match_cache[tid] = (pid, sim, time.time())
+            
+            tkey = f"t{tid}" if tid else (pid or f"u{cx//60}")
+            self.trajectories[tkey].append((cx, cy, current_time))
+            if len(self.trajectories[tkey]) > 60: self.trajectories[tkey].pop(0)
+            vel = self._calculate_velocity(tkey)
+            
+            if pid and pid in self.active_sessions:
+                auth_cnt += 1
+                color, lbl = (0, 255, 0), f"{pid} ({sim:.2f})"
+                if vel > 2.0: self.alert_manager.alert_running(pid, vel)
             else:
-                print(
-                    f"   ❌ UNAUTHORIZED (best score: {similarity:.3f} < adaptive threshold: {adaptive_threshold:.3f})"
-                )
-                if similarity > 0.25:
-                    print(f"   💡 Cross-camera domain shift detected! (entry→room)")
-                    print(
-                        f"   💡 Adaptive threshold: {adaptive_threshold:.3f}, Gap required: {debug_info.get('adaptive_gap', 0.08):.3f}"
-                    )
+                unauth_cnt += 1
+                ukey = tid if tid else f"u{cx//60}_{cy//60}"
+                if ukey not in self._unauthorized_track_ids:
+                    self.stats["unauthorized"] += 1
+                    self._unauthorized_track_ids.add(ukey)
+                color, lbl = (0, 0, 255), f"UNAUTHORIZED ({sim:.2f})"
+                self.alert_manager.alert_unauthorized(f"unauth_{ukey}")
+            
+            cv2.rectangle(display, (bx, by), (bx + bw, by + bh), color, 2)
+            cv2.putText(display, lbl, (bx, by-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-            # Print matching scores ONLY when debug mode is ON (to reduce console spam)
-            if self.debug_mode:
-                print(f"\n🔍 ROOM DETECTION (DEBUG MODE):")
-                print(f"   Body bbox: ({bx}, {by}, {bw}, {bh})")
-                print(
-                    f"   Adaptive threshold: {adaptive_threshold:.2f} | Adaptive gap: {debug_info.get('adaptive_gap', 0.08):.2f}"
-                )
-                print(f"   Camera pair: entry → room (HUGE domain shift expected!)")
-                if not self.registered_people:
-                    print(f"   ⚠️  NO REGISTERED PEOPLE YET!")
-                else:
-                    print(
-                        f"   Testing against {len(self.registered_people)} registered people:"
-                    )
-                    for pid, scores in debug_info.get("all_scores", {}).items():
-                        total = scores.get("total", 0)
-                        osnet = scores.get("osnet", 0)
-                        hair = scores.get("hair", 0)
-                        skin = scores.get("skin", 0)
-                        clothing = scores.get("clothing", 0)
+        if weapon_detected:
+            h, w = display.shape[:2]
+            cv2.rectangle(display, (0, 110), (w, 150), (0, 0, 200), -1)
+            cv2.putText(display, "⚠️ WEAPON DETECTED ⚠️", (w//2-150, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
 
-                        # Check if rejected due to low OSNet
-                        rejected = scores.get("rejected", None)
-                        if rejected:
-                            print(f"   {pid}: ❌ REJECTED - {rejected}")
-                            continue
-
-                        status = (
-                            "✅ MATCH"
-                            if total >= self.similarity_threshold
-                            else "❌ BELOW"
-                        )
-                        gap = total - self.similarity_threshold
-                        print(f"   {pid}: {total:.3f} {status} (gap: {gap:+.3f})")
-                        print(
-                            f"      OSNet: {osnet:.3f} × {self.osnet_weight:.2f} = {osnet * self.osnet_weight:.3f} {'← LOW!' if osnet < 0.60 else '✓'}"
-                        )
-                        print(
-                            f"      Hair:  {hair:.3f} × {self.hair_weight:.2f} = {hair * self.hair_weight:.3f}"
-                        )
-                        print(
-                            f"      Skin:  {skin:.3f} × {self.skin_weight:.2f} = {skin * self.skin_weight:.3f}"
-                        )
-                        print(
-                            f"      Cloth: {clothing:.3f} × {self.clothing_weight:.2f} = {clothing * self.clothing_weight:.3f}"
-                        )
-
-                    if person_id:
-                        gap = debug_info.get("gap", 0)
-                        second = debug_info.get("second_best", 0)
-                        print(f"   🎯 FINAL MATCH: {person_id} ({similarity:.3f})")
-                        print(f"      Gap from 2nd best: {gap:.3f} (2nd: {second:.3f})")
-                    else:
-                        reason = debug_info.get("reason", "unknown")
-                        if reason == "below_threshold":
-                            print(
-                                f"   ❌ NO MATCH: Best score {similarity:.3f} < threshold {self.similarity_threshold:.3f}"
-                            )
-                            if similarity > 0.60:
-                                print(f"   💡 HINT: Close! Press - to lower threshold")
-                        elif reason == "ambiguous":
-                            gap = debug_info.get("gap", 0)
-                            second = debug_info.get("second_best", 0)
-                            print(
-                                f"   ❌ NO MATCH: AMBIGUOUS! Best {similarity:.3f} vs 2nd {second:.3f} (gap: {gap:.3f})"
-                            )
-                            print(
-                                f"   ⚠️  Multiple people too similar - can't distinguish!"
-                            )
-                print()
-            else:
-                # Print simplified summary when not in debug mode
-                if person_id and person_id in self.active_sessions:
-                    print(f"   Session: ACTIVE ✓")
-                elif not person_id and similarity > 0.50:
-                    print(f"   Hint: Score {similarity:.3f} is close. Lower threshold?")
-
-            # ── Trajectory + velocity tracking for ALL detections ────────────
-            # Use ByteTrack ID as the trajectory key when available — this
-            # gives stable tails even across brief occlusions.
-            if track_id is not None and track_id > 0:
-                track_key = f"t{track_id}"
-            elif person_id:
-                track_key = person_id
-            else:
-                track_key = f"unauth_{center_x // 60}_{center_y // 60}"
-
-            self.trajectories[track_key].append((center_x, center_y, current_time))
-            if len(self.trajectories[track_key]) > 60:
-                self.trajectories[track_key].pop(0)
-
-            velocity = self._calculate_velocity(track_key)
-            self.velocity_data[track_key].append(velocity)
-            frame_velocities.append(velocity)
-
-            # Always draw the trajectory tail
-            self._draw_trajectory(display, track_key)
-
-            # Velocity indicator (shown for every detection)
-            velocity_text = f"{velocity:.2f} m/s"
-            if velocity > 2.0:
-                v_color = (0, 0, 255)  # RED - running
-                velocity_text += " RUNNING!"
-            elif velocity > 1.0:
-                v_color = (0, 165, 255)  # ORANGE - fast walk
-            else:
-                v_color = (0, 255, 0)  # GREEN - normal
-
-            # Show ByteTrack ID on overlay when tracker is active
-            track_label_suffix = (
-                f" [T{track_id}]" if (track_id is not None and track_id > 0) else ""
-            )
-
-            cv2.putText(
-                display,
-                velocity_text,
-                (bx, by + bh + 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                v_color,
-                1,
-            )
-
-            # Check if person has active session
-            if person_id and person_id in self.active_sessions:
-                # AUTHORIZED person with active session
-                authorized_count += 1
-                box_color = (0, 255, 0)  # GREEN
-                label = f"{person_id} ({similarity:.2f}){track_label_suffix}"
-
-                # Store trajectory point in DB (only for registered persons)
-                self.database.add_trajectory_point(
-                    person_id,
-                    center_x,
-                    center_y,
-                    "room_camera",
-                    velocity=velocity,
-                    track_id=track_id,
-                )
-
-                # ── Phase 7: Loitering check for authorized persons ───────────
-                if self.loitering is not None:
-                    is_loitering, dwell = self.loitering.update(
-                        person_id, center_x, center_y
-                    )
-                    if is_loitering:
-                        self.alert_manager.alert_loitering(
-                            person_id=person_id,
-                            dwell_seconds=dwell,
-                            zone=self.loitering.get_current_zone(person_id),
-                            camera_source="room_camera",
-                        )
-                        # Draw loitering indicator on frame
-                        cv2.putText(
-                            display,
-                            f"LOITERING {dwell:.0f}s",
-                            (bx, by - 30),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            (0, 100, 255),
-                            2,
-                        )
-                    elif dwell > 10:
-                        # Show dwell counter as a soft indicator
-                        cv2.putText(
-                            display,
-                            f"dwell:{dwell:.0f}s",
-                            (bx, by - 30),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.35,
-                            (180, 180, 0),
-                            1,
-                        )
-
-                # ── Phase 7: Running alert for authorized person ──────────────
-                if velocity > 2.0:
-                    self.alert_manager.alert_running(
-                        person_id=person_id,
-                        velocity=velocity,
-                        camera_source="room_camera",
-                    )
-
-                # Additional debug if enabled
-                if self.debug_mode:
-                    print(
-                        f"   📊 Session active, velocity={velocity:.2f} m/s"
-                        + (f", track={track_id}" if track_id else "")
-                    )
-
-            else:
-                # UNAUTHORIZED detection
-                unauthorized_count += 1
-                self.stats["unauthorized"] += 1
-                box_color = (0, 0, 255)  # RED
-                unauth_key = (
-                    f"unauth_{track_id}"
-                    if track_id
-                    else f"unauth_{center_x // 60}_{center_y // 60}"
-                )
-                label = f"UNAUTHORIZED ({similarity:.2f}){track_label_suffix}"
-
-                # ── Phase 7: Loitering check for unauthorized persons ─────────
-                if self.loitering is not None:
-                    is_loitering, dwell = self.loitering.update(
-                        unauth_key, center_x, center_y
-                    )
-                    if is_loitering:
-                        cv2.putText(
-                            display,
-                            f"LOITERING {dwell:.0f}s",
-                            (bx, by - 30),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            (0, 50, 255),
-                            2,
-                        )
-
-                # Alert
-                self.alert_manager.alert_unauthorized(
-                    person_id=unauth_key,
-                    camera_source="room_camera",
-                )
-
-            # Draw pose keypoints and skeleton if available
-            if detection.get("keypoints") is not None:
-                keypoints = detection["keypoints"]
-
-                # Draw skeleton connections first
-                skeleton = [
-                    (0, 1),
-                    (0, 2),
-                    (1, 3),
-                    (2, 4),  # Head
-                    (5, 6),
-                    (5, 7),
-                    (7, 9),
-                    (6, 8),
-                    (8, 10),  # Arms
-                    (5, 11),
-                    (6, 12),
-                    (11, 12),  # Torso
-                    (11, 13),
-                    (13, 15),
-                    (12, 14),
-                    (14, 16),  # Legs
-                ]
-
-                for start_idx, end_idx in skeleton:
-                    if start_idx < len(keypoints) and end_idx < len(keypoints):
-                        x1, y1, conf1 = keypoints[start_idx]
-                        x2, y2, conf2 = keypoints[end_idx]
-                        if conf1 > 0.3 and conf2 > 0.3:
-                            cv2.line(
-                                display,
-                                (int(x1), int(y1)),
-                                (int(x2), int(y2)),
-                                (0, 255, 255),
-                                2,
-                            )
-
-                # Draw keypoints on top
-                for i, (x, y, conf) in enumerate(keypoints):
-                    if conf > 0.3:
-                        kpt_color = (0, 255, 0) if conf > 0.7 else (0, 200, 200)
-                        cv2.circle(display, (int(x), int(y)), 5, kpt_color, -1)
-                        cv2.circle(display, (int(x), int(y)), 6, (255, 255, 255), 1)
-
-            # Draw bbox and label (use box_color preserved from status check above)
-            cv2.rectangle(display, (bx, by), (bx + bw, by + bh), box_color, 2)
-            cv2.putText(
-                display,
-                label,
-                (bx, by - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                box_color,
-                2,
-            )
-
-        # Status overlay — use actual frame width
-        h_disp, w_disp = display.shape[:2]
-        cv2.rectangle(display, (0, 0), (w_disp, 110), (0, 0, 0), -1)
-        cv2.putText(
-            display,
-            "ROOM CAMERA",
-            (10, 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 0),
-            2,
-        )
-        cv2.putText(
-            display,
-            f"Inside: {self.stats['inside']} | Authorized: {authorized_count}",
-            (10, 50),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 0) if authorized_count > 0 else (255, 255, 255),
-            2,
-        )
-        cv2.putText(
-            display,
-            f"Unauthorized: {unauthorized_count}",
-            (10, 70),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 0, 255) if unauthorized_count > 0 else (200, 200, 200),
-            1,
-        )
-        cv2.putText(
-            display,
-            f"Detections: {len(detections)}",
-            (10, 90),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.4,
-            (200, 200, 200),
-            1,
-        )
-
-        if self.debug_mode:
-            cv2.putText(
-                display,
-                "DEBUG MODE: ON",
-                (10, 105),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.35,
-                (0, 255, 255),
-                1,
-            )
-
-        # ── Phase 7: Panic behavior detection ────────────────────────────────
-        if frame_velocities and len(frame_velocities) >= self._panic_person_threshold:
-            avg_v = sum(frame_velocities) / len(frame_velocities)
-            if avg_v >= self._panic_velocity_threshold:
-                self.alert_manager.alert_panic(
-                    person_count=len(frame_velocities),
-                    avg_velocity=avg_v,
-                    camera_source="room_camera",
-                )
-                # Red panic banner
-                h_disp, w_disp = display.shape[:2]
-                cv2.rectangle(
-                    display, (0, h_disp - 35), (w_disp, h_disp), (0, 0, 200), -1
-                )
-                cv2.putText(
-                    display,
-                    f"⚠ PANIC DETECTED — {len(frame_velocities)} people @ {avg_v:.1f} m/s",
-                    (10, h_disp - 12),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    (255, 255, 255),
-                    2,
-                )
-
-        # ── Phase 7: Mass gathering check ────────────────────────────────────
-        total_in_room = authorized_count + unauthorized_count
-        mass_threshold = 5
-        if total_in_room >= mass_threshold:
-            self.alert_manager.alert_mass_gathering(
-                zone_id="room",
-                person_count=total_in_room,
-                camera_source="room_camera",
-            )
-
-        # ── Phase 7: Push annotated frame to API bridge (MJPEG stream) ───────
-        if self.api_bridge is not None:
-            self.api_bridge.push_frame("room", display)
-
-        # ── Phase 6: Tracker overlay (top-right corner) ──────────────────────
-        if self.multi_tracker is not None:
-            diag = self.multi_tracker.diagnostics()
-            h_disp, w_disp = display.shape[:2]
-            tracker_txt = (
-                f"Tracks: {diag['active_tracks']} active / {diag['lost_tracks']} lost"
-            )
-            cv2.putText(
-                display,
-                tracker_txt,
-                (w_disp - 280, 25),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.38,
-                (180, 255, 180),
-                1,
-            )
-
+        h, w = display.shape[:2]
+        cv2.rectangle(display, (0, 0), (w, 80), (0, 0, 0), -1)
+        cv2.putText(display, f"Inside: {len(self.active_sessions)} | Auth: {auth_cnt} | Unauth: {unauth_cnt}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        if self.api_bridge: self.api_bridge.push_frame("room", display)
         return display
 
-    def _draw_trajectory(self, frame: np.ndarray, person_id: str):
-        """Draw trajectory path."""
-        trajectory = self.trajectories.get(person_id, [])
-        if len(trajectory) < 2:
-            return
-
-        points = [(int(x), int(y)) for x, y, _ in trajectory]
-
-        # Draw lines
-        for i in range(1, len(points)):
-            thickness = max(1, int(3 * (i / len(points))))
-            cv2.line(frame, points[i - 1], points[i], (0, 255, 255), thickness)
-
-    def _release_lost_tracks(self) -> None:
-        """
-        Purge cache entries for ByteTrack IDs that are no longer active.
-        Called once per room-camera frame so that when a track is re-acquired
-        (e.g. person re-enters frame) it gets a fresh face-based evaluation
-        rather than inheriting a stale body-only match.
-        """
-        if self.multi_tracker is None:
-            return
-        try:
-            diag = self.multi_tracker.diagnostics()
-            active_ids: set = set(diag.get("active_track_ids", []))
-        except Exception:
-            return
-
-        stale = [
-            tid for tid in list(self._track_match_cache.keys()) if tid not in active_ids
-        ]
-        for tid in stale:
-            del self._track_match_cache[tid]
-            self._face_confirmed_tracks.discard(tid)
-
-    def process_exit_camera(self, frame: np.ndarray) -> np.ndarray:
-        """Process exit camera - match and close sessions."""
-        # Apply cross-camera preprocessing FIRST
-        frame_preprocessed = self.cross_camera.preprocess_frame(frame, camera_id="exit")
-
-        display = frame_preprocessed.copy()
+    def process_exit_camera(self, frame):
+        display = frame.copy()
         current_time = datetime.now()
-
-        # Detect people (on preprocessed frame)
-        detections = self.detector.detect(frame_preprocessed)
+        detections = self.detector.detect(frame)
         self.stats["exit_detections"] += len(detections)
-
-        for detection in detections:
-            body_bbox = detection["body_bbox"]
-            bx, by, bw, bh = body_bbox
-
-            # ALWAYS print exit detection status
-            print(f"\n🚪 EXIT: Person detected at ({bx}, {by}), size: {bw}x{bh}")
-
-            # Match against registered people (with target_camera='exit')
-            person_id, similarity, debug_info = self.match_person(
-                frame_preprocessed, detection, target_camera="exit"
-            )
-
-            # Get adaptive threshold for display
-            adaptive_threshold = debug_info.get(
-                "adaptive_threshold", self.exit_threshold
-            )
-
-            # Re-evaluate with EXIT-specific threshold (more lenient)
-            original_person_id = person_id
-            if (
-                not person_id
-                and self.registered_people
-                and similarity >= self.exit_threshold
-            ):
-                # Original match_person rejected it, but it meets exit threshold
-                # Find the best match that meets exit criteria
-                best_id = None
-                best_score = 0.0
-                second_best_score = 0.0
-
-                for pid, scores in debug_info.get("all_scores", {}).items():
-                    total = scores.get("total", 0)
-                    if total > best_score:
-                        second_best_score = best_score
-                        best_score = total
-                        best_id = pid
-                    elif total > second_best_score:
-                        second_best_score = total
-
-                # Check exit-specific gap
-                if best_score >= self.exit_threshold:
-                    if (
-                        len(self.registered_people) == 1
-                        or (best_score - second_best_score) >= self.exit_confidence_gap
-                    ):
-                        person_id = best_id
-                        similarity = best_score
-                        print(
-                            f"   🔓 EXIT OVERRIDE: Accepting {person_id} (score: {best_score:.3f}, exit threshold: {self.exit_threshold:.2f})"
-                        )
-
-            # Quick status print
-            if person_id and person_id in self.active_sessions:
-                print(f"   ✅ VALID EXIT: {person_id} (score: {similarity:.3f})")
-            elif person_id:
-                print(f"   ⚠️  REGISTERED but NO ACTIVE SESSION: {person_id}")
-            else:
-                print(
-                    f"   ❌ UNKNOWN PERSON (best score: {similarity:.3f} < adaptive threshold: {adaptive_threshold:.2f})"
-                )
-                if similarity > 0.50:
-                    print(
-                        f"   💡 Close to threshold! Press '[' to lower exit threshold"
-                    )
-
-            # Only print debug when match status changes or in debug mode
-            if self.debug_mode or (not original_person_id and person_id):
-                print(f"\n🚪 EXIT DETECTION:")
-                print(
-                    f"   Exit threshold: {self.exit_threshold:.2f} (room: {self.similarity_threshold:.2f})"
-                )
-                if not self.registered_people:
-                    print(f"   ⚠️  NO REGISTERED PEOPLE YET!")
-                else:
-                    for pid, scores in debug_info.get("all_scores", {}).items():
-                        total = scores.get("total", 0)
-                        status = "✅" if total >= self.exit_threshold else "❌"
-                        print(f"   {pid}: {total:.3f} {status}")
-                    if person_id:
-                        print(f"   🎯 MATCHED: {person_id} ({similarity:.3f})")
-                    else:
-                        print(f"   ❌ NO MATCH (best: {similarity:.3f})")
-                print()
-
-            if person_id and person_id in self.active_sessions:
-                # Valid exit
-                box_color = (0, 255, 0)  # GREEN
-                label = f"{person_id} EXITING"
-
-                # Close session
-                session_info = self.active_sessions[person_id]
-                entry_time = session_info["entry_time"]
-                duration = (current_time - entry_time).total_seconds()
-
-                # Calculate average velocity
-                velocities = self.velocity_data.get(person_id, [0.0])
-                avg_velocity = sum(velocities) / len(velocities)
-                max_velocity = max(velocities) if velocities else 0.0
-
-                # Record exit in database
-                self.database.record_exit(person_id)
-
-                # Update person record with velocity data and re-persist so
-                # avg_velocity / max_velocity are not 0 in the database.
-                # (record_exit persists before velocity is known, so we must
-                # write it a second time after computing the values.)
-                if person_id in self.database.people:
-                    person = self.database.people[person_id]
-                    person["avg_velocity"] = avg_velocity
-                    person["max_velocity"] = max_velocity
-                    self.database._persist_person_to_db(person)
-
-                # Remove from active
-                del self.active_sessions[person_id]
-                self.person_status[person_id] = "exited"
+        for d in detections:
+            bbox = d["body_bbox"]
+            bx, by, bw, bh = bbox
+            self._draw_skeletons(display, d.get("keypoints"))
+            pid, sim, _ = self.match_person(frame, d, "exit")
+            if pid and pid in self.active_sessions:
                 self.stats["inside"] -= 1
                 self.stats["exited"] += 1
-
-                print(f"\n✅ {person_id} exited")
-                print(f"   Duration: {duration:.1f}s")
-                print(f"   Avg velocity: {avg_velocity:.2f} m/s")
-                print(f"   Max velocity: {max_velocity:.2f} m/s")
-
-                # ── Phase 6: remove tracker association on exit ───────────────
-                if self.multi_tracker is not None:
-                    self.multi_tracker.dissociate(person_id)
-
-                # ── Phase 7: remove loitering state on exit ───────────────────
-                if self.loitering is not None:
-                    self.loitering.remove_person(person_id)
-
-                # ── Phase 7: push exit event to WebSocket ─────────────────────
-                if self.api_bridge is not None:
-                    self.api_bridge.push_event(
-                        "exit",
-                        {
-                            "person_id": person_id,
-                            "duration_seconds": round(duration, 1),
-                            "avg_velocity": round(avg_velocity, 3),
-                            "max_velocity": round(max_velocity, 3),
-                            "timestamp": datetime.now().isoformat(),
-                        },
-                    )
-
-            elif person_id:
-                # Person registered but no active session
-                box_color = (0, 165, 255)  # ORANGE
-                label = f"{person_id} NO SESSION"
+                del self.active_sessions[pid]
+                self.database.record_exit(pid)
+                if self.api_bridge: self.api_bridge.push_event("exit", {"person_id": pid})
+                cv2.rectangle(display, (bx, by), (bx+bw, by+bh), (0, 255, 0), 2)
+                cv2.putText(display, f"EXIT: {pid}", (bx, by-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             else:
-                # Unknown person at exit
-                box_color = (0, 0, 255)  # RED
-                label = "UNKNOWN"
-
-            # Draw pose keypoints and skeleton if available
-            if detection.get("keypoints") is not None:
-                keypoints = detection["keypoints"]
-
-                # Draw skeleton connections first
-                skeleton = [
-                    (0, 1),
-                    (0, 2),
-                    (1, 3),
-                    (2, 4),  # Head
-                    (5, 6),
-                    (5, 7),
-                    (7, 9),
-                    (6, 8),
-                    (8, 10),  # Arms
-                    (5, 11),
-                    (6, 12),
-                    (11, 12),  # Torso
-                    (11, 13),
-                    (13, 15),
-                    (12, 14),
-                    (14, 16),  # Legs
-                ]
-
-                for start_idx, end_idx in skeleton:
-                    if start_idx < len(keypoints) and end_idx < len(keypoints):
-                        x1, y1, conf1 = keypoints[start_idx]
-                        x2, y2, conf2 = keypoints[end_idx]
-                        if conf1 > 0.3 and conf2 > 0.3:
-                            cv2.line(
-                                display,
-                                (int(x1), int(y1)),
-                                (int(x2), int(y2)),
-                                (0, 255, 255),
-                                2,
-                            )
-
-                # Draw keypoints on top
-                for i, (x, y, conf) in enumerate(keypoints):
-                    if conf > 0.3:
-                        kpt_color = (0, 255, 0) if conf > 0.7 else (0, 200, 200)
-                        cv2.circle(display, (int(x), int(y)), 5, kpt_color, -1)
-                        cv2.circle(display, (int(x), int(y)), 6, (255, 255, 255), 1)
-
-            # Draw (use box_color preserved from status check above)
-            cv2.rectangle(display, (bx, by), (bx + bw, by + bh), box_color, 2)
-            cv2.putText(
-                display,
-                label,
-                (bx, by - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                box_color,
-                2,
-            )
-
-        # Status overlay — use actual frame width
-        # ── Phase 7: Push annotated frame to API bridge (MJPEG stream) ───────
-        if self.api_bridge is not None:
-            self.api_bridge.push_frame("exit", display)
-
-        h_disp, w_disp = display.shape[:2]
-        cv2.rectangle(display, (0, 0), (w_disp, 90), (0, 0, 0), -1)
-        cv2.putText(
-            display,
-            "EXIT CAMERA",
-            (10, 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 0, 255),
-            2,
-        )
-        cv2.putText(
-            display,
-            f"Exited: {self.stats['exited']} | Still Inside: {self.stats['inside']}",
-            (10, 50),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 255, 255),
-            1,
-        )
-        cv2.putText(
-            display,
-            f"Detections: {len(detections)} | Threshold: {self.exit_threshold:.2f} | Face-ID: {'ON' if self.use_face_recognition else 'OFF'}",
-            (10, 70),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.4,
-            (0, 255, 255) if self.use_face_recognition else (200, 200, 200),
-            1,
-        )
-        cv2.putText(
-            display,
-            f"Face matching: {'face-first (60%) + OSNet (40%)' if self.use_face_recognition else 'body-only OSNet (70%) + appearance (30%)'}",
-            (10, 86),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.33,
-            (180, 180, 180),
-            1,
-        )
-
+                cv2.rectangle(display, (bx, by), (bx+bw, by+bh), (0, 0, 255), 2)
+                cv2.putText(display, "UNKNOWN", (bx, by-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        if self.api_bridge: self.api_bridge.push_frame("exit", display)
         return display
 
-    def show_statistics(self):
-        """Print detailed statistics."""
-        print("\n" + "=" * 70)
-        print("  SYSTEM STATISTICS")
-        print("=" * 70)
-        print(f"Registered People:      {self.stats['registered']}")
-        print(f"Currently Inside:       {self.stats['inside']}")
-        print(f"Total Exited:           {self.stats['exited']}")
-        print(f"Unauthorized Detections: {self.stats['unauthorized']}")
-        print(f"\nCamera Detections:")
-        print(f"  Entry:  {self.stats['entry_detections']}")
-        print(f"  Room:   {self.stats['room_detections']}")
-        print(f"  Exit:   {self.stats['exit_detections']}")
-        print(f"  Total:  {self.stats['total_detections']}")
-        print("\nActive Sessions:")
-        for pid, session in self.active_sessions.items():
-            duration = (datetime.now() - session["entry_time"]).total_seconds()
-            print(f"  {pid}: {duration:.1f}s inside")
-        print("=" * 70 + "\n")
+    def _release_lost_tracks(self):
+        if not self.multi_tracker: return
+        active = set(self.multi_tracker.diagnostics().get("active_track_ids", []))
+        stale = [tid for tid in self._track_match_cache if tid not in active]
+        for tid in stale:
+            if tid in self._track_match_cache: del self._track_match_cache[tid]
+            self._face_confirmed_tracks.discard(tid)
+
+    def _draw_trajectory(self, frame, pid):
+        pts = self.trajectories.get(pid, [])
+        for i in range(1, len(pts)):
+            cv2.line(frame, (int(pts[i-1][0]), int(pts[i-1][1])), (int(pts[i][0]), int(pts[i][1])), (0, 255, 255), 2)
 
     def run(self):
-        """Main loop."""
-        print("\n🚀 Starting system...\n")
-
-        try:
-            while self.running:
-                # Read frames
-                ret_entry, frame_entry = self.cap_entry.read()
-                ret_room, frame_room = self.cap_room.read()
-                ret_exit, frame_exit = self.cap_exit.read()
-
-                if not (ret_entry and ret_room and ret_exit):
-                    print("⚠️ Failed to read from cameras")
-                    break
-
-                # Normalize all frames to the target resolution before processing.
-                # This ensures consistent coordinates for detection, feature
-                # extraction, and overlay rendering across all three cameras.
-                target = (self.FRAME_WIDTH, self.FRAME_HEIGHT)
-                if (
-                    frame_entry.shape[1] != self.FRAME_WIDTH
-                    or frame_entry.shape[0] != self.FRAME_HEIGHT
-                ):
-                    frame_entry = cv2.resize(
-                        frame_entry, target, interpolation=cv2.INTER_LINEAR
-                    )
-                if (
-                    frame_room.shape[1] != self.FRAME_WIDTH
-                    or frame_room.shape[0] != self.FRAME_HEIGHT
-                ):
-                    frame_room = cv2.resize(
-                        frame_room, target, interpolation=cv2.INTER_LINEAR
-                    )
-                if (
-                    frame_exit.shape[1] != self.FRAME_WIDTH
-                    or frame_exit.shape[0] != self.FRAME_HEIGHT
-                ):
-                    frame_exit = cv2.resize(
-                        frame_exit, target, interpolation=cv2.INTER_LINEAR
-                    )
-
-                # Process each camera
-                display_entry = self.process_entry_camera(frame_entry)
-                display_room = self.process_room_camera(frame_room)
-                display_exit = self.process_exit_camera(frame_exit)
-
-                # Show windows
-                cv2.imshow("Entry Gate", display_entry)
-                cv2.imshow("Room Monitoring", display_room)
-                cv2.imshow("Exit Gate", display_exit)
-
-                # Handle keys
-                key = cv2.waitKey(1) & 0xFF
-
-                if key == ord("q"):
-                    print("\n⚠️  Quit requested...")
-                    break
-                elif key == ord("d"):
-                    self.debug_mode = not self.debug_mode
-                    print(f"\n🔧 Debug mode: {'ON' if self.debug_mode else 'OFF'}\n")
-                elif key == ord("c"):
-                    print("\n⚠️  Clearing all registrations...")
-                    self.registered_people.clear()
-                    self.active_sessions.clear()
-                    self.trajectories.clear()
-                    self.velocity_data.clear()
-                    self.person_status.clear()
-                    self.entry_cooldown.clear()
-                    self.last_entry_person_bbox = None
-                    self.detection_history.clear()
-                    self.stable_ids.clear()
-                    self._track_match_cache.clear()
-                    self.stats = {k: 0 for k in self.stats}
-                    # ── Phase 6: reset tracker so ByteTrack IDs restart ────────
-                    if self.multi_tracker is not None:
-                        self.multi_tracker.reset()
-                    # ── Phase 7: reset behavior detectors ─────────────────────
-                    if self.loitering is not None:
-                        self.loitering.reset()
-                    if self.tailgating is not None:
-                        self.tailgating.reset()
-                    print("✅ All data cleared\n")
-                elif key == ord("s"):
-                    self.show_statistics()
-                elif key == ord("+") or key == ord("="):
-                    self.similarity_threshold = min(
-                        0.90, self.similarity_threshold + 0.05
-                    )
-                    print(
-                        f"\n🔧 ROOM Threshold INCREASED to {self.similarity_threshold:.2f} (stricter)\n"
-                    )
-                elif key == ord("-") or key == ord("_"):
-                    self.similarity_threshold = max(
-                        0.40, self.similarity_threshold - 0.05
-                    )
-                    print(
-                        f"\n🔧 ROOM Threshold DECREASED to {self.similarity_threshold:.2f} (more lenient)\n"
-                    )
-                elif key == ord("]"):
-                    self.exit_threshold = min(0.90, self.exit_threshold + 0.05)
-                    print(
-                        f"\n🔧 EXIT Threshold INCREASED to {self.exit_threshold:.2f} (stricter)\n"
-                    )
-                elif key == ord("["):
-                    self.exit_threshold = max(0.40, self.exit_threshold - 0.05)
-                    print(
-                        f"\n🔧 EXIT Threshold DECREASED to {self.exit_threshold:.2f} (more lenient)\n"
-                    )
-                elif key == ord("e"):
-                    print("\n⚠️  Manual registration mode not implemented for entry")
-                    print("    (Auto-registration is active)\n")
-                elif key == ord("i"):
-                    # Show cross-camera adapter info
-                    self.cross_camera.print_diagnostics()
-                elif key == ord("t"):
-                    # ── Phase 6: tracker diagnostics ─────────────────────────
-                    if self.multi_tracker is not None:
-                        diag = self.multi_tracker.diagnostics()
-                        print("\n" + "=" * 50)
-                        print("  TRACKER DIAGNOSTICS (ByteTrack)")
-                        print("=" * 50)
-                        print(f"  Active tracks:  {diag['active_tracks']}")
-                        print(f"  Lost tracks:    {diag['lost_tracks']}")
-                        print(f"  Total seen:     {diag['total_tracks']}")
-                        print(f"  Person map:     {diag['person_map']}")
-                        print("=" * 50 + "\n")
-                    else:
-                        print("\n⚠️  Tracker not available\n")
-                elif key == ord("f"):
-                    # Toggle face recognition
-                    if self.face_recognizer is not None:
-                        self.use_face_recognition = not self.use_face_recognition
-                        print(
-                            f"\n🔧 Face recognition: {'ON' if self.use_face_recognition else 'OFF'}\n"
-                        )
-                    else:
-                        print(
-                            "\n⚠️  Face recognition not available (InsightFace not installed)\n"
-                        )
-
-        except Exception as e:
-            print(f"\n❌ Error in main loop: {e}")
-            import traceback
-
-            traceback.print_exc()
-
-        finally:
-            print("\n🛑 Shutting down...")
-            self.cleanup()
+        while self.running:
+            re, fe = self.cap_entry.read()
+            rr, fr = self.cap_room.read()
+            rx, fx = self.cap_exit.read()
+            if not (re and rr and rx): break
+            de, dr, dx = self.process_entry_camera(fe), self.process_room_camera(fr), self.process_exit_camera(fx)
+            cv2.imshow("Entry", de); cv2.imshow("Room", dr); cv2.imshow("Exit", dx)
+            if cv2.waitKey(1) & 0xFF == ord('q'): break
+        self.cleanup()
 
     def cleanup(self):
-        """Cleanup resources."""
-        print("📊 Exporting session data...")
-        self.show_statistics()
-
-        # Persist final trajectories and write last_session.json
-        print("💾 Closing database (saving trajectories + session export)...")
         self.database.close()
-
-        # ── Phase 7: stop API bridge ──────────────────────────────────────────
-        if self.api_bridge is not None:
-            print("🌐 Stopping API bridge...")
-            self.api_bridge.stop()
-
-        print("📹 Releasing cameras...")
-        self.cap_entry.release()
-        self.cap_room.release()
-        self.cap_exit.release()
-
+        if self.api_bridge: self.api_bridge.stop()
+        self.cap_entry.release(); self.cap_room.release(); self.cap_exit.release()
         cv2.destroyAllWindows()
-        print("✅ Cleanup complete\n")
-
-
-def _detect_available_cameras(max_index: int = 6) -> list:
-    """Probe camera indices 0..max_index-1 and return those that produce frames."""
-    available = []
-    for i in range(max_index):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            ret, _ = cap.read()
-            if ret:
-                available.append(i)
-        cap.release()
-    return available
-
 
 def main():
-    """
-    Entry point with argparse-based camera assignment.
-
-    Camera setup for this project:
-      --entry   iBall Face2Face CHD20.0 Webcam (720p, USB)
-      --room    MacBook FaceTime HD (built-in, usually index 0 on macOS)
-      --exit    Redmi Note 11 via Iriun Webcam app (USB/WiFi)
-
-    Run the helper script first if you are unsure which index maps to which camera:
-        python scripts/detect_cameras.py
-
-    Default indices (0=MacBook built-in, 1=iBall, 2=Iriun) are chosen for a
-    typical macOS setup where the built-in webcam claims index 0 and USB cameras
-    are assigned sequentially.  Override with --entry / --room / --exit if needed.
-    """
     import argparse
-
-    parser = argparse.ArgumentParser(
-        description="YOLO26 Three-Camera Security System",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Camera setup:
-  --entry  Entry gate camera  (default index: 0)
-  --room   Room monitor camera (default index: 2)
-  --exit   Exit gate camera   (default index: 1)
-
-Run  python scripts/detect_cameras.py  to identify camera indices.
-        """,
-    )
-    parser.add_argument(
-        "--entry",
-        type=int,
-        default=0,
-        metavar="IDX",
-        help="Camera index for Entry gate (default: 0)",
-    )
-    parser.add_argument(
-        "--room",
-        type=int,
-        default=2,
-        metavar="IDX",
-        help="Camera index for Room monitor (default: 2)",
-    )
-    parser.add_argument(
-        "--exit",
-        type=int,
-        default=1,
-        metavar="IDX",
-        help="Camera index for Exit gate (default: 1)",
-    )
-    parser.add_argument(
-        "--list-cameras",
-        action="store_true",
-        help="Probe and list all available camera indices, then exit",
-    )
-    parser.add_argument(
-        "--no-api",
-        action="store_true",
-        default=False,
-        help="Disable the FastAPI REST / WebSocket bridge (default: enabled)",
-    )
-    parser.add_argument(
-        "--api-port",
-        type=int,
-        default=8000,
-        metavar="PORT",
-        help="Port for the REST / WebSocket API bridge (default: 8000)",
-    )
-    parser.add_argument(
-        "--no-tracker",
-        action="store_true",
-        default=False,
-        help="Disable ByteTrack multi-person tracker (use frame-by-frame detection)",
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--entry", type=int, default=0)
+    parser.add_argument("--room", type=int, default=2)
+    parser.add_argument("--exit", type=int, default=1)
     args = parser.parse_args()
-
-    print("\n" + "=" * 70)
-    print("  YOLO26 COMPLETE SECURITY SYSTEM")
-    print("=" * 70)
-
-    if args.list_cameras:
-        print("\n🔍 Probing camera indices 0-5 …")
-        available = _detect_available_cameras()
-        if available:
-            print(f"✅ Found camera(s) at index(es): {available}")
-        else:
-            print("❌ No cameras detected.")
-        return
-
-    entry_idx = args.entry
-    room_idx = args.room
-    exit_idx = args.exit
-
-    print(f"\n📹 Camera Assignment:")
-    print(f"   Entry Camera : index {entry_idx}")
-    print(f"   Room  Camera : index {room_idx}")
-    print(f"   Exit  Camera : index {exit_idx}")
-    print()
-    print("💡 Tip: run with --list-cameras to identify indices,")
-    print("         or override with --entry N --room N --exit N")
-    print()
-
-    enable_api = not args.no_api
-    api_port = args.api_port
-
-    if enable_api:
-        print(f"🌐 API bridge: http://localhost:{api_port}  (--no-api to disable)")
-    else:
-        print("🌐 API bridge: disabled")
-
-    if args.no_tracker:
-        # Monkey-patch the module-level flag so __init__ skips tracker init
-        import yolo26_complete_system as _self_mod
-
-        _self_mod._TRACKER_AVAILABLE = False
-        print("⚠️  ByteTrack tracker disabled by --no-tracker flag")
-
-    print()
-
-    # Create and run system
-    system = YOLO26CompleteSystem(
-        entry_idx=entry_idx,
-        room_idx=room_idx,
-        exit_idx=exit_idx,
-        enable_api=enable_api,
-        api_port=api_port,
-    )
+    system = YOLO26CompleteSystem(args.entry, args.room, args.exit)
     system.run()
-
 
 if __name__ == "__main__":
     main()

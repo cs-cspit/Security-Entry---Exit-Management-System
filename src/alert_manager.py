@@ -91,6 +91,7 @@ class AlertType(Enum):
     DOOR_FORCED = "door_forced"
     TRACK_LOST = "track_lost"
     SYSTEM_ERROR = "system_error"
+    WEAPON_DETECTED = "weapon_detected"
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +487,23 @@ class AlertManager:
             message=f"Unauthorized person detected: {person_id}",
             person_id=person_id,
             camera_source=camera_source,
+        )
+
+    def alert_weapon(
+        self,
+        label: str,
+        confidence: float,
+        camera_source: str = "room_camera",
+        person_id: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """Shortcut for WEAPON_DETECTED alert."""
+        return self.create_alert(
+            alert_type=AlertType.WEAPON_DETECTED,
+            alert_level=AlertLevel.CRITICAL,
+            message=f"⚠️ WEAPON DETECTED: {label.upper()} ({confidence:.2f})",
+            person_id=person_id,
+            camera_source=camera_source,
+            metadata={"weapon_type": label, "confidence": confidence},
         )
 
     def alert_running(
