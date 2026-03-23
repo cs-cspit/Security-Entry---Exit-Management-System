@@ -145,3 +145,7 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+
+# Allow custom models
+!custom_models/
+!custom_models/**
