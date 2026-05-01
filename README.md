@@ -20,20 +20,21 @@ An AI-powered three-camera physical security system that:
 
 | Role | Device | Resolution | Connection |
 |------|--------|-----------|------------|
-| **Entry** | iBall Face2Face CHD20.0 | 720p HD | USB |
+| **Entry** | Android phone via DroidCam + OBS Virtual Camera | 720p HD | USB / Wi-Fi |
 | **Room** | MacBook FaceTime HD | 720p HD | Built-in |
 | **Exit** | Redmi Note 11 (Iriun Webcam) | 720p HD | USB / Wi-Fi |
 
 > All frames are normalised to **640 × 480** internally to ensure consistent detection coordinates and overlay rendering across all three cameras.
 
 ### Finding Your Camera Indices
+The entry camera now uses an OBS virtual source from DroidCam, so use `--entry obs` instead of relying on a fixed hardware index.
+Room and exit cameras still use numeric indices.
 
-On macOS the built-in webcam is usually index **0**, and USB cameras are assigned sequentially.
 A typical layout is:
 
 ```
 0 → MacBook FaceTime HD   (Room)
-1 → iBall CHD20.0         (Entry)
+1/3 → OBS Virtual Camera  (Entry via DroidCam)
 2 → Redmi via Iriun       (Exit)
 ```
 
@@ -41,12 +42,6 @@ Run the helper to confirm:
 
 ```
 python scripts/detect_cameras.py
-```
-
-or:
-
-```
-python yolo26_complete_system.py --list-cameras
 ```
 
 ---
@@ -175,25 +170,25 @@ python scripts/system_check.py
 bash run_system.sh
 ```
 
-The script activates the virtual environment, checks dependencies, and launches the system with the default camera indices (`--entry 1 --room 0 --exit 2`).
+The script activates the virtual environment, checks dependencies, and launches the system using the main script defaults (`--entry obs --room 2 --exit 1`).
 
 ### Manual launch
 
 ```bash
 source venv/bin/activate
-python yolo26_complete_system.py --entry 1 --room 0 --exit 2
+python yolo26_complete_system.py --entry obs --room 0 --exit 2
 ```
 
-### Override camera indices
+### Override camera sources
 
 ```bash
-python yolo26_complete_system.py --entry 2 --room 0 --exit 1
+python yolo26_complete_system.py --entry "http://PHONE_IP:4747/video" --room 0 --exit 2
 ```
 
 ### List detected cameras
 
 ```bash
-python yolo26_complete_system.py --list-cameras
+python scripts/detect_cameras.py
 ```
 
 ---
@@ -251,7 +246,7 @@ All data is persisted to `data/yolo26_complete_system.db`.
 
 ## Known Issues & Current Limitations
 
-- **False positives in room camera:** Cross-camera domain shift (iBall → MacBook) causes OSNet scores to drop significantly.  The adaptive threshold system partially compensates, but improvements are ongoing.
+- **False positives in room camera:** Cross-camera domain shift (Phone via DroidCam/OBS → MacBook) can still lower OSNet similarity scores. The adaptive threshold system partially compensates, but improvements are ongoing.
 - **Single-person sessions only:** The current pipeline handles one person at a time through the entry gate.  Phase 6 (multi-person tracking) will address crowded scenarios.
 - **Face occlusion:** If a person wears a mask or turns away at the exit gate, the system automatically falls back to body-only matching.
 - **Iriun resolution:** Ensure the Iriun app on the Redmi is set to the same resolution as the other cameras (640 × 480 or 720p) for best results.
@@ -264,6 +259,3 @@ All data is persisted to `data/yolo26_complete_system.db`.
 - **Debdoot Manna** — 23CS043
 
 CSPIT / CSE / B1-C1
-```
-
-Now back to continuing the work:

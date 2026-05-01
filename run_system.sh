@@ -4,20 +4,21 @@
 # =============================================================================
 #
 # Camera setup for this project:
-#   Entry  : iBall Face2Face CHD20.0 Webcam (720p HD, USB)
+#   Entry  : Phone camera via DroidCam + OBS Virtual Camera
 #   Room   : MacBook FaceTime HD (built-in)
 #   Exit   : Redmi Note 11 via Iriun Webcam app (USB/WiFi)
 #
-# Default camera indices (macOS — built-in webcam is usually 0):
-#   --entry 1   (iBall USB webcam)
-#   --room  0   (MacBook built-in)
-#   --exit  2   (Redmi via Iriun)
+# Default launch sources (from yolo26_complete_system.py):
+#   --entry obs  (auto-detect OBS Virtual Camera / DroidCam feed)
+#   --room  2    (numeric camera index)
+#   --exit  1    (numeric camera index)
 #
 # Override if your setup differs:
-#   bash run_system.sh --entry 2 --room 0 --exit 1
+#   bash run_system.sh --entry obs --room 0 --exit 2
+#   bash run_system.sh --entry "http://PHONE_IP:4747/video" --room 0 --exit 2
 #
 # To identify which index belongs to which camera:
-#   bash run_system.sh --list-cameras
+#   python scripts/detect_cameras.py
 # =============================================================================
 
 set -e
@@ -34,9 +35,9 @@ echo -e "${CYAN}================================================================
 echo -e "${CYAN}  YOLO26 THREE-CAMERA SECURITY SYSTEM${NC}"
 echo -e "${CYAN}=====================================================================${NC}"
 echo ""
-echo -e "  Entry  : iBall Face2Face CHD20.0 (720p HD, USB)  → default idx 1"
-echo -e "  Room   : MacBook FaceTime HD (built-in)          → default idx 0"
-echo -e "  Exit   : Redmi Note 11 via Iriun                 → default idx 2"
+echo -e "  Entry  : Phone via DroidCam + OBS Virtual Cam    → default source 'obs'"
+echo -e "  Room   : Room camera source                       → default idx 2"
+echo -e "  Exit   : Exit camera source                       → default idx 1"
 echo ""
 echo -e "${CYAN}=====================================================================${NC}"
 echo ""
@@ -160,8 +161,9 @@ echo ""
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 # Pass all script arguments straight through so callers can do:
-#   bash run_system.sh --entry 2 --room 0 --exit 1
-#   bash run_system.sh --list-cameras
+#   bash run_system.sh --entry obs --room 0 --exit 2
+#   bash run_system.sh --entry "http://PHONE_IP:4747/video" --room 0 --exit 2
+#   python scripts/detect_cameras.py
 python yolo26_complete_system.py "$@"
 
 EXIT_CODE=$?
