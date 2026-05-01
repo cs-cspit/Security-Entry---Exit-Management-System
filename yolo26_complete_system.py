@@ -70,7 +70,7 @@ except ImportError:
 class YOLO26CompleteSystem:
     def __init__(
         self,
-        entry_idx=0,
+        entry_idx="obs",
         room_idx=2,
         exit_idx=1,
         enable_api: bool = True,
@@ -215,14 +215,109 @@ class YOLO26CompleteSystem:
 
         self._init_cameras()
         signal.signal(signal.SIGINT, self.signal_handler)
+    @staticmethod
+    def _parse_camera_source(source):
+        """Allow camera source to be either integer index or string stream source."""
+        if isinstance(source, int):
+            return source
+        if source is None:
+            return 0
+        source_str = str(source).strip()
+        if source_str.lstrip("+-").isdigit():
+            return int(source_str)
+        return source_str
+
+    def _open_camera_capture(self, source, role, reserved_indices=None):
+        """Open camera source, with special handling for OBS/DroidCam entry camera."""
+        reserved_indices = {
+            idx for idx in (reserved_indices or []) if isinstance(idx, int) and idx >= 0
+        }
+        normalized_source = self._parse_camera_source(source)
+
+        obs_aliases = {
+            "obs",
+            "obs_virtual",
+            "obs-virtual",
+            "virtualcam",
+            "virtual_cam",
+            "droidcam",
+            "phone",
+        }
+        if (
+            role == "entry"
+            and isinstance(normalized_source, str)
+            and normalized_source.lower() in obs_aliases
+        ):
+            print("📹 Entry camera configured for OBS/DroidCam source.")
+
+            candidate_indices = []
+            obs_candidates_env = os.getenv("YOLO26_OBS_ENTRY_CANDIDATES", "3,2,1,0,4,5")
+            for token in obs_candidates_env.split(","):
+                token = token.strip()
+                if token.lstrip("+-").isdigit():
+                    idx = int(token)
+                    if (
+                        idx >= 0
+                        and idx not in reserved_indices
+                        and idx not in candidate_indices
+                    ):
+                        candidate_indices.append(idx)
+            for idx in range(8):
+                if idx not in reserved_indices and idx not in candidate_indices:
+                    candidate_indices.append(idx)
+
+            for idx in candidate_indices:
+                cap = cv2.VideoCapture(idx)
+                if cap.isOpened():
+                    ok, _ = cap.read()
+                    if ok:
+                        print(f"✅ Entry camera opened from OBS candidate index {idx}")
+                        return cap, idx
+                cap.release()
+
+            droidcam_url = os.getenv("YOLO26_DROIDCAM_URL", "").strip()
+            if droidcam_url:
+                cap = cv2.VideoCapture(droidcam_url)
+                if cap.isOpened():
+                    print(f"✅ Entry camera opened from YOLO26_DROIDCAM_URL: {droidcam_url}")
+                    return cap, droidcam_url
+                cap.release()
+
+            fallback_idx = 0
+            while fallback_idx in reserved_indices:
+                fallback_idx += 1
+            print(
+                f"⚠️  OBS/DroidCam source not auto-detected; falling back to camera index {fallback_idx}"
+            )
+            return cv2.VideoCapture(fallback_idx), fallback_idx
+
+        return cv2.VideoCapture(normalized_source), normalized_source
 
     def _init_cameras(self):
         self.FRAME_WIDTH = 640
         self.FRAME_HEIGHT = 480
-        self.cap_entry = cv2.VideoCapture(self.entry_idx)
-        self.cap_room = cv2.VideoCapture(self.room_idx)
-        self.cap_exit = cv2.VideoCapture(self.exit_idx)
-        for cap in [self.cap_entry, self.cap_room, self.cap_exit]:
+        room_source = self._parse_camera_source(self.room_idx)
+        exit_source = self._parse_camera_source(self.exit_idx)
+        reserved_for_entry = [
+            src for src in (room_source, exit_source) if isinstance(src, int) and src >= 0
+        ]
+
+        self.cap_entry, self.entry_idx = self._open_camera_capture(
+            self.entry_idx, "entry", reserved_indices=reserved_for_entry
+        )
+        self.cap_room, self.room_idx = self._open_camera_capture(room_source, "room")
+        self.cap_exit, self.exit_idx = self._open_camera_capture(exit_source, "exit")
+
+        for name, cap in [
+            ("entry", self.cap_entry),
+            ("room", self.cap_room),
+            ("exit", self.cap_exit),
+        ]:
+            if cap is None or not cap.isOpened():
+                print(
+                    f"⚠️  Could not open {name} camera source: {getattr(self, f'{name}_idx')}"
+                )
+                continue
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.FRAME_WIDTH)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.FRAME_HEIGHT)
 
@@ -575,12 +670,27 @@ class YOLO26CompleteSystem:
 
 def main():
     import argparse
+
+    def _parse_cli_camera_source(value):
+        value = str(value).strip()
+        if value.lstrip("+-").isdigit():
+            return int(value)
+        return value
     parser = argparse.ArgumentParser()
-    parser.add_argument("--entry", type=int, default=0)
-    parser.add_argument("--room", type=int, default=2)
-    parser.add_argument("--exit", type=int, default=1)
+    parser.add_argument(
+        "--entry",
+        type=str,
+        default="obs",
+        help="Entry camera source: index, URL, or 'obs' for OBS/DroidCam virtual camera",
+    )
+    parser.add_argument("--room", type=str, default="2")
+    parser.add_argument("--exit", type=str, default="1")
     args = parser.parse_args()
-    system = YOLO26CompleteSystem(args.entry, args.room, args.exit)
+    system = YOLO26CompleteSystem(
+        _parse_cli_camera_source(args.entry),
+        _parse_cli_camera_source(args.room),
+        _parse_cli_camera_source(args.exit),
+    )
     system.run()
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ Cross-Camera Domain Adaptation Module
 Handles domain shift across different camera models for person re-identification.
 
 Camera Setup:
-- Entry: iBall Face2Face CHD20.0 (720p, budget webcam)
+- Entry: Phone camera via DroidCam + OBS Virtual Camera
 - Room: MacBook M2 FaceTime HD (1080p, premium)
 - Exit: Redmi Note 11 (1080p, mobile sensor)
 
@@ -40,12 +40,13 @@ class CrossCameraAdapter:
         # Camera-specific profiles
         self.camera_profiles = {
             "entry": {
-                "name": "iBall Face2Face CHD20.0",
+                "name": "Phone Camera (DroidCam + OBS Virtual Camera)",
                 "resolution": "720p",
-                "characteristics": "Budget webcam, tends to be warmer/more yellow",
-                "warmth_correction": -8,  # Reduce warmth (negative = cooler)
-                "brightness_boost": 5,  # Slightly brighten
-                "clahe_clip_limit": 2.5,  # Stronger contrast enhancement
+                "characteristics": "Mobile camera feed through OBS, sharper and slightly saturated",
+                "warmth_correction": -2,  # Mild correction vs old iBall-heavy correction
+                "brightness_boost": 1,  # Near-neutral exposure
+                "saturation_scale": 0.95,  # Tame slight oversaturation from phone feed
+                "clahe_clip_limit": 2.2,  # Moderate contrast enhancement
             },
             "room": {
                 "name": "MacBook M2 FaceTime HD",
@@ -269,12 +270,12 @@ class CrossCameraAdapter:
             # (We know scores are artificially lower across cameras)
 
             if source_camera == "entry" and target_camera == "room":
-                # iBall → MacBook: Huge shift, boost significantly
-                adjusted_score *= 1.15
+                # DroidCam/OBS → MacBook: moderate shift
+                adjusted_score *= 1.10
 
             elif source_camera == "entry" and target_camera == "exit":
-                # iBall → Redmi: Moderate shift
-                adjusted_score *= 1.10
+                # DroidCam/OBS → Redmi: mild-to-moderate shift
+                adjusted_score *= 1.08
 
             elif source_camera == "room" and target_camera == "exit":
                 # MacBook → Redmi: Less shift (both modern)
